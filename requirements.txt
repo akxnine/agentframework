@@ -1,0 +1,10 @@
+agent-framework
+agent-framework-ollama
+pymupdf
+openpyxl
+pydantic
+httpx
+msal
+python-dotenv
+pytest
+reportlab
