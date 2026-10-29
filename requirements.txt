@@ -11,3 +11,6 @@ reportlab
 requests
 rich
 psutil
+streamlit
+plotly
+pandas

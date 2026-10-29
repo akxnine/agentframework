@@ -7,6 +7,8 @@ from rich.logging import RichHandler
 from rich.rule import Rule
 from rich.table import Table
 
+from .events import emit
+
 console = Console(stderr=True, width=max(Console().width, 140))
 
 STEP_STYLES = {0: "cyan", 1: "blue", 2: "magenta", 3: "yellow", 4: "green", 5: "red"}
@@ -20,6 +22,7 @@ def setup_logging() -> None:
 
 
 def step(n: int, title: str) -> None:
+    emit("step", n=n, title=title)
     console.print()
     console.print(Rule(f"[bold]Step {n}[/bold] · {title}", style=STEP_STYLES.get(n, "white"), align="left"))
 
