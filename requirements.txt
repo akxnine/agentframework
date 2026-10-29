@@ -1,5 +1,5 @@
 agent-framework
-agent-framework-ollama
+openai
 pymupdf
 openpyxl
 pydantic
@@ -8,3 +8,5 @@ msal
 python-dotenv
 pytest
 reportlab
+requests
+rich

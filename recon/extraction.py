@@ -1,50 +1,86 @@
-import base64
 import glob
+import json
+import logging
 import os
+import time
 
 import pymupdf
-from ollama import AsyncClient
+from openai import AsyncOpenAI
 
 from .config import Settings
-from .models import Trade, TradeList
+from .dashboard import LLMCall, llm_calls
+from .models import Statement, StatementList
 
-MIN_TEXT_CHARS = 80
-PROMPT = (
-    "Extract every trade from this document. Return JSON {\"trades\": [...]} where each trade has: "
-    "symbol (ticker), trade_date (YYYY-MM-DD), side (BUY or SELL), quantity (number), price (number, per unit), "
-    "account (account id/number, empty string if none). Do not invent trades; skip totals and fees."
-)
+log = logging.getLogger("recon")
+
+PROMPT = """Extract every account statement from the brokerage document below. A document may contain several accounts.
+Return ONLY JSON of this shape:
+{"statements": [{"broker": "brokerage firm name", "account_number": "...", "account_type": "e.g. Individual, IRA, Joint, Trust",
+ "account_holder": "primary holder name", "related_persons": ["joint owner, beneficiary, trustee, advisor names"],
+ "trades": [{"symbol": "TICKER", "trade_date": "YYYY-MM-DD", "side": "BUY or SELL", "quantity": 0, "price": 0}]}]}
+Rules: one entry per account; trades are executed buy/sell transactions only (skip dividends, fees, totals, balances);
+price is per unit; quantity is a positive number; do not invent data."""
 
 
-def list_pdfs(folder: str, role: str) -> list[str]:
-    return sorted(glob.glob(os.path.join(folder, role, "*.pdf")))
+def list_pdfs(folder: str) -> list[str]:
+    return sorted(glob.glob(os.path.join(folder, "*.pdf")))
 
 
-def read_pdf(path: str, dpi: int = 150) -> tuple[str, list[str]]:
-    """Return (text, base64 page PNGs). Images only populated for pages lacking a text layer."""
-    texts, images = [], []
+def read_pdf_text(path: str) -> str:
     with pymupdf.open(path) as doc:
-        for page in doc:
-            t = page.get_text().strip()
-            if len(t) >= MIN_TEXT_CHARS:
-                texts.append(t)
-            else:
-                images.append(base64.b64encode(page.get_pixmap(dpi=dpi).tobytes("png")).decode())
-    return "\n\n".join(texts), images
+        text = "\n\n".join(page.get_text().strip() for page in doc)
+    if not text.strip():
+        raise ValueError("no text layer (scanned PDF); OCR is not configured")
+    return text
 
 
-async def extract_trades(settings: Settings, path: str) -> list[Trade]:
-    text, images = read_pdf(path)
-    content = PROMPT + (f"\n\nDocument text:\n{text}" if text else "")
-    msg = {"role": "user", "content": content}
-    if images:
-        msg["images"] = images
-    client = AsyncClient(host=settings.ollama_host)
-    resp = await client.chat(model=settings.model, messages=[msg], format=TradeList.model_json_schema(),
-                             options={"temperature": 0})
-    trades = TradeList.model_validate_json(resp.message.content).trades
+def _json_block(text: str) -> str:
+    """Strip markdown fences / prose around the JSON object the model returns."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError(f"model returned no JSON: {text[:200]!r}")
+    return text[start:end + 1]
+
+
+def _normalise(statements: list[Statement], name: str) -> list[Statement]:
+    for st in statements:
+        st.source_file = name
+        st.account_number = st.account_number.strip()
+        for t in st.trades:
+            t.source_file = name
+            t.account = st.account_number
+            t.symbol = t.symbol.strip().upper()
+    return statements
+
+
+async def extract_statements(settings: Settings, path: str, attempts: int = 2) -> list[Statement]:
+    text = read_pdf_text(path)
+    client = AsyncOpenAI(base_url=settings.openai_base_url, api_key="foundry-local")
+    last: Exception | None = None
     name = os.path.basename(path)
-    for t in trades:
-        t.source_file = name
-        t.symbol = t.symbol.strip().upper()
-    return trades
+    for attempt in range(1, attempts + 1):
+        t0 = time.time()
+        resp = await client.chat.completions.create(
+            model=settings.model, temperature=0,
+            messages=[{"role": "user", "content": f"{PROMPT}\n\nDocument text:\n{text}"}])
+        usage = resp.usage
+        call = LLMCall(f"{name} (try {attempt}/{attempts})", "Extract accounts & trades from PDF text",
+                       getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0,
+                       time.time() - t0)
+        llm_calls.append(call)
+        try:
+            data = StatementList.model_validate_json(_json_block(resp.choices[0].message.content or ""))
+            return _normalise(data.statements, name)
+        except ValueError as e:  # includes pydantic.ValidationError
+            call.ok = False
+            last = e
+            log.warning("  attempt %d/%d returned invalid JSON: %s", attempt, attempts, str(e).splitlines()[0])
+    raise ValueError(f"could not parse model output: {last}")
+
+
+def save_json(statements: list[Statement], out_dir: str, pdf_path: str) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, os.path.splitext(os.path.basename(pdf_path))[0] + ".json")
+    with open(out, "w") as f:
+        json.dump([s.model_dump() for s in statements], f, indent=2)
+    return out
