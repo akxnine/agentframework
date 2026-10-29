@@ -2,13 +2,17 @@
 """System + Foundry Local model preflight with a live terminal dashboard.
 
 Usage:
-  python system_check.py                 # one-shot dashboard
+  python system_check.py                 # one-shot dashboard, then one dashboard per cached model
+                                         # (stops/restarts the Foundry server; it is stopped at the end)
+  python system_check.py --no-models     # skip the per-model dashboards (server left untouched)
+  python system_check.py -v              # also trace raw output of every command run
   python system_check.py --watch         # refresh every 2s until Ctrl+C
   python system_check.py --model NAME    # override FOUNDRY_MODEL
 Exit code is 1 if any check is critical (e.g. server down, model missing, very low free RAM).
 """
 import argparse
 import json
+import logging
 import os
 import platform
 import re
@@ -21,20 +25,33 @@ import httpx
 import psutil
 from rich.console import Console, Group
 from rich.live import Live
+from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 GB = 1024 ** 3
 console = Console()
+logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%H:%M:%S]",
+                    handlers=[RichHandler(console=console, show_path=False, markup=False)])
+log = logging.getLogger("system_check")
 
 
 def sh(*cmd: str, timeout: int = 20) -> str:
+    """Run a command and return stdout+stderr; every call is traced (command, exit code, duration)."""
+    log.info("$ %s", " ".join(cmd))
+    t0 = time.time()
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return (p.stdout + p.stderr).strip()
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("  ! %s failed after %.1fs: %s", cmd[0], time.time() - t0, exc)
         return ""
+    out = (p.stdout + p.stderr).strip()
+    (log.info if p.returncode == 0 else log.warning)("  -> exit %s in %.1fs (%d chars output)",
+                                                     p.returncode, time.time() - t0, len(out))
+    for line in out.splitlines():
+        log.debug("  | %s", line)
+    return out
 
 
 def bar(frac: float, width: int = 20) -> Text:
@@ -100,7 +117,8 @@ def foundry_state(host: str, model: str) -> dict:
 
 def matches(model: str, served: list[str]) -> list[str]:
     """Foundry serves variant IDs (e.g. gemma-4-e2b-it-generic-gpu:3); the alias is their prefix."""
-    return [m for m in served if model and (m == model or m.startswith(model + "-"))]
+    model = model.lower()
+    return [m for m in served if model and (m.lower() == model or m.lower().startswith(model + "-"))]
 
 
 def model_size_gb(model: str, cache: str) -> float | None:
@@ -207,6 +225,82 @@ def requirements_table(vm, disk, gpu_list: list[dict]) -> Table:
     return t
 
 
+def stop_server() -> None:
+    log.info("Stopping Foundry server")
+    sh("foundry", "server", "stop", timeout=60)
+
+
+def start_server() -> str:
+    """Start the daemon (output not captured: it can hold pipes open) and return its base URL, or '' on failure."""
+    log.info("Starting Foundry server")
+    log.info("$ foundry server start")
+    subprocess.run(["foundry", "server", "start"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=120)
+    for attempt in range(1, 31):
+        try:
+            out = sh("foundry", "server", "status", "--output", "json")
+            d = json.loads(out[out.index("{"):])
+            log.info("  server state=%s (poll %d/30)", d.get("state"), attempt)
+            if str(d.get("state", "")).lower() == "ready" and d.get("webUrls"):
+                host = d["webUrls"][0].rstrip("/").split("/openai")[0]
+                log.info("Server ready at %s", host)
+                return host
+        except ValueError:
+            log.warning("  could not parse server status")
+        time.sleep(1)
+    log.error("Server did not become ready within 30s")
+    return ""
+
+
+def cached_models() -> list[str]:
+    out = sh("foundry", "model", "list", "--cached", "--output", "json", timeout=120)
+    try:
+        models = json.JSONDecoder().raw_decode(out[out.index('{"models"'):])[0]["models"]
+    except (ValueError, KeyError):
+        log.warning("Could not parse cached model list")
+        return []
+    aliases = list(dict.fromkeys(m["alias"] for m in models if m.get("alias")))
+    log.info("Cached models: %s", ", ".join(aliases) or "none")
+    return aliases
+
+
+def per_model_dashboards() -> None:
+    """Restart the server, then load each cached model on its own and print a dashboard for it.
+    The server is always stopped at the end."""
+    if not shutil.which("foundry"):
+        console.print("[yellow]foundry CLI not found; skipping per-model dashboards.[/]")
+        return
+    try:
+        console.rule("[bold cyan]Per-model dashboards[/]", style="cyan")
+        stop_server()
+        if not start_server():
+            console.print("[red]Server failed to start; skipping per-model dashboards.[/]")
+            return
+        models = cached_models()
+        if not models:
+            console.print("[yellow]No cached models; skipping per-model dashboards.[/]")
+        for i, alias in enumerate(models, 1):
+            console.rule(f"[bold magenta]Model {i}/{len(models)}: {alias}[/]", style="magenta")
+            stop_server()
+            host = start_server()
+            if not host:
+                console.print(f"[red]Server failed to start for {alias}.[/]")
+                continue
+            log.info("Loading model %s (can take a while)", alias)
+            t0 = time.time()
+            load = sh("foundry", "model", "load", alias, timeout=900)
+            log.info("Model %s load finished in %.1fs", alias, time.time() - t0)
+            log_line = load.splitlines()[-1] if load else ""
+            if log_line:
+                console.print(Text(log_line, style="dim"))
+            log.info("Collecting system details for %s", alias)
+            body, _ = build(alias, host)
+            console.print(body)
+    finally:
+        stop_server()
+        console.print("[bold green]Foundry server stopped.[/]")
+
+
 def build(model: str, host: str) -> tuple[Group, bool]:
     vm, sw = psutil.virtual_memory(), psutil.swap_memory()
     disk = shutil.disk_usage(os.path.expanduser("~"))
@@ -214,40 +308,58 @@ def build(model: str, host: str) -> tuple[Group, bool]:
     st = foundry_state(host, model)
     ram_free = vm.available / GB
 
+    def lbl(s: str) -> Text:
+        return Text(s, style="bold cyan")
+
     sysinfo = Table.grid(padding=(0, 2))
-    sysinfo.add_row("OS", f"{platform.system()} {platform.release()} ({platform.machine()})")
-    sysinfo.add_row("CPU", f"{platform.processor() or platform.machine()} · {psutil.cpu_count(logical=False)}P/"
-                           f"{psutil.cpu_count()}L cores")
-    sysinfo.add_row("CPU load", bar(psutil.cpu_percent(interval=0.3) / 100))
-    sysinfo.add_row("RAM", Text.assemble(bar(vm.percent / 100), f"  {vm.used / GB:.1f}/{vm.total / GB:.1f} GB, "
-                                                                 f"{ram_free:.1f} GB available"))
-    sysinfo.add_row("Swap", Text.assemble(bar(sw.percent / 100 if sw.total else 0),
-                                          f"  {sw.used / GB:.1f}/{sw.total / GB:.1f} GB"))
-    sysinfo.add_row("Disk (home)", Text.assemble(bar(disk.used / disk.total), f"  {disk.free / GB:.0f} GB free"))
+    sysinfo.add_row(lbl("OS"), f"{platform.system()} {platform.release()} ({platform.machine()})")
+    sysinfo.add_row(lbl("CPU"), f"{platform.processor() or platform.machine()} · {psutil.cpu_count(logical=False)}P/"
+                                f"{psutil.cpu_count()}L cores")
+    sysinfo.add_row(lbl("CPU load"), bar(psutil.cpu_percent(interval=0.3) / 100))
+    ram_style = "red" if ram_free < 3 else "yellow" if ram_free < 6 else "green"
+    sysinfo.add_row(lbl("RAM"), Text.assemble(bar(vm.percent / 100), f"  {vm.used / GB:.1f}/{vm.total / GB:.1f} GB, ",
+                                              (f"{ram_free:.1f} GB available", ram_style)))
+    sw_style = "green" if sw.used / GB <= 1 else "red"
+    sysinfo.add_row(lbl("Swap"), Text.assemble(bar(sw.percent / 100 if sw.total else 0),
+                                               (f"  {sw.used / GB:.1f}/{sw.total / GB:.1f} GB", sw_style)))
+    disk_style = "red" if disk.free / GB < 10 else "yellow" if disk.free / GB < 20 else "green"
+    sysinfo.add_row(lbl("Disk (home)"), Text.assemble(bar(disk.used / disk.total),
+                                                      (f"  {disk.free / GB:.0f} GB free", disk_style)))
     for g in gpu_list:
         label = Text.assemble(bar(g["used"] / g["total"] if g["total"] else 0),
                               f"  {g['used']:.1f}/{g['total']:.1f} GB · {g['kind']}")
-        sysinfo.add_row(f"GPU: {g['name']}", label)
+        sysinfo.add_row(lbl(f"GPU: {g['name']}"), label)
     if not gpu_list:
-        sysinfo.add_row("GPU", Text("none detected", style="yellow"))
+        sysinfo.add_row(lbl("GPU"), Text("none detected", style="yellow"))
 
+    matched = matches(model, st["served"])
     cfg = Table.grid(padding=(0, 2))
-    cfg.add_row("Host", st["host"] or "[red]unset[/]")
-    cfg.add_row("Server", "[green]up[/]" if st["up"] else "[red]down[/]")
-    cfg.add_row("Model (FOUNDRY_MODEL)", model or "[yellow]unset[/]")
-    cfg.add_row("Served entries", f"{len(st['served'])} total; matching: {', '.join(matches(model, st['served'])) or '-'}")
-    cfg.add_row("Loaded in memory", "yes" if st["loaded"] else "no (loads on first request)")
+    cfg.add_row(lbl("Host"), st["host"] or "[red]unset[/]")
+    cfg.add_row(lbl("Server"), "[bold green]up[/]" if st["up"] else "[bold red]down[/]")
+    cfg.add_row(lbl("Model (FOUNDRY_MODEL)"), f"[bold magenta]{model}[/]" if model else "[yellow]unset[/]")
+    cfg.add_row(lbl("Served entries"), Text.assemble(
+        f"{len(st['served'])} total; matching: ",
+        (", ".join(matched), "green") if matched else ("-", "red" if model else "dim")))
+    cfg.add_row(lbl("Loaded in memory"),
+                "[bold green]yes[/]" if st["loaded"] else "[yellow]no (loads on first request)[/]")
     for var in ("FOUNDRY_HOST", "OUTPUT_FOLDER", "DOCS_FOLDER"):
-        cfg.add_row(var, os.getenv(var, "-"))
-    cache = Panel(Group(*[Text(x, style="dim") for x in (st["cache"],) if x])
-                  if st["cli"] else "(foundry CLI unavailable)", title="Cache models",
-                  border_style="dim")
+        val = os.getenv(var)
+        cfg.add_row(lbl(var), val if val else Text("-", style="dim"))
+
+    def cache_line(ln: str) -> Text:
+        if ln.rstrip("| ").endswith("●"):
+            return Text(ln, style="bold green")
+        return Text(ln, style="dim" if set(ln) <= set("+-| ") else "white")
+
+    cache = Panel(Group(*[cache_line(x) for x in st["cache"].splitlines()])
+                  if st["cli"] else Text("(foundry CLI unavailable)", style="yellow"),
+                  title="[bold]Cache models[/]", border_style="blue")
 
     tips = Table.grid(padding=(0, 1))
     icons = {"ok": "[green]✔[/]", "warn": "[yellow]▲[/]", "crit": "[red]✖[/]"}
     adv = advice(model, ram_free, sw.used / GB, gpu_list, st, disk.free / GB)
     for sev, msg, fix in adv:
-        tips.add_row(icons[sev], msg)
+        tips.add_row(icons[sev], Text(msg, style={"ok": "green", "warn": "yellow", "crit": "bold red"}[sev]))
         if fix:
             tips.add_row("", Text("→ Fix: " + fix, style="cyan"))
 
@@ -266,11 +378,18 @@ def main() -> int:
     ap.add_argument("--host", default=os.getenv("FOUNDRY_HOST", "").rstrip("/"))
     ap.add_argument("--watch", action="store_true", help="refresh continuously")
     ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--no-models", action="store_true", help="skip the per-cached-model dashboards")
+    ap.add_argument("-v", "--verbose", action="store_true", help="also trace raw command output")
     args = ap.parse_args()
+    # the full-screen --watch display would be garbled by trace lines
+    log.setLevel(logging.DEBUG if args.verbose else logging.WARNING if args.watch else logging.INFO)
 
+    log.info("System check starting (model=%s, host=%s)", args.model or "unset", args.host or "auto")
     body, crit = build(args.model, args.host)
     if not args.watch:
         console.print(body)
+        if not args.no_models:
+            per_model_dashboards()
         return 1 if crit else 0
     try:
         with Live(body, console=console, refresh_per_second=4, screen=True) as live:

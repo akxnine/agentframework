@@ -5,6 +5,7 @@ from datetime import date
 
 from .compare import compare_trades
 from .config import Settings
+from .console import ExtractStats, console, extraction_table, step
 from .dashboard import DocRow, Summary, llm_calls, print_dashboards
 from .emailer import send_email
 from .excel_io import norm_acct, read_client_trades, tracker_accounts, update_tracker
@@ -30,52 +31,64 @@ def compare_by_account(client: list[Trade], advisor: list[Trade]) -> list[Discre
 
 
 async def run_pipeline(settings: Settings, dry_run: bool = False) -> str:
-    log.info("== 0. Pre-check: %s ==", settings.check_server())
+    step(0, "Pre-check")
+    log.info("[green]✔[/] Foundry server ready: [bold]%s[/]", settings.check_server())
     out_dir = settings.output_folder
     llm_calls.clear()
     summary = Summary()
 
-    log.info("== 1. Extract statements ==")
+    step(1, "Extract statements")
     statements: list[Statement] = []
     failed: list[str] = []
     pdfs = list_pdfs(settings.statements_dir)
-    for path in pdfs:
-        log.info("Extracting %s", path)
+    all_stats: list[ExtractStats] = []
+    for i, path in enumerate(pdfs, 1):
+        stats = ExtractStats(os.path.basename(path))
+        all_stats.append(stats)
         try:
-            found = await extract_statements(settings, path)
+            with console.status(f"[cyan]Extracting {stats.file} ({i}/{len(pdfs)}) ...[/]", spinner="dots"):
+                found = await extract_statements(settings, path, stats=stats)
+            log.info("[green]✔[/] %s: %d statement(s), %d trades in %.1fs", stats.file, stats.statements,
+                     stats.trades, stats.total_secs)
         except Exception as e:
-            log.error("  failed: %s", e)
+            stats.status, stats.error = "FAILED", str(e).splitlines()[0][:80]
+            log.error("[red]✘ %s failed:[/] %s", stats.file, e)
             failed.append(f"{os.path.basename(path)}: {e}")
             summary.docs.append(DocRow(os.path.basename(path), error=str(e).splitlines()[0][:60]))
             continue
         summary.docs.append(DocRow(os.path.basename(path), len(found), sum(len(s.trades) for s in found)))
         for s in found:
-            log.info("  %s | account %s (%s) | holder %s | related %s | %d trades", s.broker, s.account_number,
-                     s.account_type or "-", s.account_holder or "-", ", ".join(s.related_persons) or "-", len(s.trades))
-        log.info("  saved %s", save_json(found, os.path.join(out_dir, "json"), path))
+            log.info("  [bold]%s[/] | account [cyan]%s[/] (%s) | holder %s | related %s | [bold]%d[/] trades",
+                     s.broker, s.account_number, s.account_type or "-", s.account_holder or "-",
+                     ", ".join(s.related_persons) or "-", len(s.trades))
+        log.info("  saved [dim]%s[/]", save_json(found, os.path.join(out_dir, "json"), path))
         statements.extend(found)
+    if all_stats:
+        console.print()
+        console.print(extraction_table(all_stats))
     if not pdfs:
         return f"No PDF statements found in {settings.statements_dir}"
     if failed:
         log.warning("%d statement file(s) failed extraction and are excluded", len(failed))
 
-    log.info("== 2. Load Arbor client trades ==")
+    step(2, "Load Arbor client trades")
     client_trades: list[Trade] = []
     for path in sorted(glob.glob(os.path.join(settings.client_trades_dir, "*.xlsx"))):
         trades = read_client_trades(path)
         log.info("  %s: %d trades", os.path.basename(path), len(trades))
         client_trades.extend(trades)
 
-    log.info("== 3. Compare ==")
+    step(3, "Compare")
     advisor_trades = [t for s in statements for t in s.trades]
     discrepancies = compare_by_account(client_trades, advisor_trades)
     suspicious = [d for d in discrepancies if d.kind == "PRICE"]
     for d in discrepancies:
-        log.info("  [%s] %s %s %s %s: %s", "SUSPICIOUS" if d.kind == "PRICE" else d.kind, d.account, d.side,
-                 d.symbol, d.trade_date, d.detail)
-    log.info("  %d discrepancies, %d suspicious", len(discrepancies), len(suspicious))
+        tag = "[bold white on red] SUSPICIOUS [/]" if d.kind == "PRICE" else f"[yellow]\\[{d.kind}][/]"
+        log.info("  %s %s %s %s %s: %s", tag, d.account, d.side, d.symbol, d.trade_date, d.detail)
+    colour = "red" if suspicious else "green"
+    log.info("  %d discrepancies, [bold %s]%d suspicious[/]", len(discrepancies), colour, len(suspicious))
 
-    log.info("== 4. Update MasterPro tracker ==")
+    step(4, "Update MasterPro tracker")
     results = {norm_acct(s.account_number): (len(s.trades), any(norm_acct(d.account) == norm_acct(s.account_number)
                                                                 for d in suspicious)) for s in statements}
     known: set[str] = set()
@@ -85,10 +98,10 @@ async def run_pipeline(settings: Settings, dry_run: bool = False) -> str:
         known |= tracker_accounts(path)
         log.info("  %s -> %s (%d accounts updated)", os.path.basename(path), target, len(accounts))
     for acct in sorted(set(results) - known):
-        log.warning("  statement account %s not found in any tracker", acct)
+        log.warning("  [yellow]statement account %s not found in any tracker[/]", acct)
 
     summary.statements, summary.client_trades, summary.discrepancies = statements, client_trades, discrepancies
-    log.info("Dashboard saved to %s", print_dashboards(summary, out_dir))
+    log.info("[green]Dashboard saved to[/] %s", print_dashboards(summary, out_dir))
 
     lines = [f"{len(statements)} statements ({len(pdfs) - len(failed)}/{len(pdfs)} PDFs), "
              f"{len(advisor_trades)} advisor / {len(client_trades)} client trades, "
@@ -97,7 +110,7 @@ async def run_pipeline(settings: Settings, dry_run: bool = False) -> str:
     if not suspicious:
         return "\n".join(lines + ["No suspicious activity: no report or email created."])
 
-    log.info("== 5. Suspicious Activity Report ==")
+    step(5, "Suspicious Activity Report")
     excel = build_excel(discrepancies, out_dir, len(client_trades), len(advisor_trades))
     pdf = build_pdf(discrepancies, out_dir, len(client_trades), len(advisor_trades))
     lines += [f"Excel: {excel}", f"PDF: {pdf}"]

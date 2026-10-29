@@ -8,6 +8,7 @@ import pymupdf
 from openai import AsyncOpenAI
 
 from .config import Settings
+from .console import ExtractStats
 from .dashboard import LLMCall, llm_calls
 from .models import Statement, StatementList
 
@@ -26,11 +27,15 @@ def list_pdfs(folder: str) -> list[str]:
     return sorted(glob.glob(os.path.join(folder, "*.pdf")))
 
 
-def read_pdf_text(path: str) -> str:
+def read_pdf_text(path: str, stats: ExtractStats | None = None) -> str:
     with pymupdf.open(path) as doc:
+        if stats:
+            stats.pages = len(doc)
         text = "\n\n".join(page.get_text().strip() for page in doc)
     if not text.strip():
         raise ValueError("no text layer (scanned PDF); OCR is not configured")
+    if stats:
+        stats.chars = len(text)
     return text
 
 
@@ -53,13 +58,26 @@ def _normalise(statements: list[Statement], name: str) -> list[Statement]:
     return statements
 
 
-async def extract_statements(settings: Settings, path: str, attempts: int = 2) -> list[Statement]:
-    text = read_pdf_text(path)
+async def extract_statements(settings: Settings, path: str, attempts: int = 2,
+                             stats: ExtractStats | None = None) -> list[Statement]:
+    stats = stats or ExtractStats(os.path.basename(path))
+    t_start = time.time()
+    try:
+        return await _extract(settings, path, attempts, stats)
+    finally:
+        stats.total_secs = time.time() - t_start
+
+
+async def _extract(settings: Settings, path: str, attempts: int, stats: ExtractStats) -> list[Statement]:
+    t_read = time.time()
+    text = read_pdf_text(path, stats)
+    stats.read_secs = time.time() - t_read
     client = AsyncOpenAI(base_url=settings.openai_base_url, api_key="foundry-local")
     last: Exception | None = None
     name = os.path.basename(path)
     for attempt in range(1, attempts + 1):
         t0 = time.time()
+        stats.attempts = attempt
         resp = await client.chat.completions.create(
             model=settings.model, temperature=0,
             messages=[{"role": "user", "content": f"{PROMPT}\n\nDocument text:\n{text}"}])
@@ -68,9 +86,16 @@ async def extract_statements(settings: Settings, path: str, attempts: int = 2) -
                        getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0,
                        time.time() - t0)
         llm_calls.append(call)
+        stats.prompt_tokens += call.prompt_tokens
+        stats.completion_tokens += call.completion_tokens
+        stats.llm_secs += time.time() - t0
         try:
             data = StatementList.model_validate_json(_json_block(resp.choices[0].message.content or ""))
-            return _normalise(data.statements, name)
+            found = _normalise(data.statements, name)
+            stats.status, stats.statements = "OK", len(found)
+            stats.trades = sum(len(x.trades) for x in found)
+            stats.accounts = [x.account_number for x in found]
+            return found
         except ValueError as e:  # includes pydantic.ValidationError
             call.ok = False
             last = e
