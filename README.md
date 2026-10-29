@@ -1,30 +1,40 @@
-# Trade Reconciliation Agent
+# Trade Reconciliation
 
-Orchestration agent built on Microsoft Agent Framework (Python) with a local Ollama model (`gemma4:12b`, vision-capable).
-It reads client and advisor PDFs (text or scanned), extracts trades, compares them, and if discrepancies exist
-creates an Excel report and emails it via Microsoft Graph.
+Python CLI that extracts trades from brokerage statement PDFs with a local
+Foundry model, compares them with client trade workbooks, updates master
+trackers, and creates and emails reports when suspicious pricing is found.
+Trade comparison is deterministic; the model is used for statement extraction.
 
 ## Setup
 ```bash
-brew install ollama && ollama serve        # model gemma4:12b must be pulled (ollama pull gemma4:12b)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env                       # fill in Graph + recipient settings
 ```
-Graph: register an Entra app with the **Mail.Send** application permission (admin consent); set tenant/client/secret and `GRAPH_SENDER`.
+Install the Foundry Local CLI, then cache the `gemma-4-e2b-it` model with
+`foundry model download gemma-4-e2b-it`. Configure `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`,
+`GRAPH_CLIENT_SECRET`, `GRAPH_SENDER`, and `EMAIL_TO` in the environment or a
+local `.env` file. Graph email requires an Entra app with **Mail.Send**
+application permission and admin consent.
 
 ## Run
-Folder layout: `<folder>/client/*.pdf` and `<folder>/advisor/*.pdf`.
+Folder layout: `<folder>/statements/*.pdf`, `<folder>/client_trades/*.xlsx`,
+and `<folder>/master/*.xlsx`.
 ```bash
-.venv/bin/python make_samples.py                        # optional sample data (one scanned PDF)
-.venv/bin/python main.py --folder ./samples --dry-run   # Excel only, no email
-.venv/bin/python main.py --folder ./samples             # sends email if discrepancies
+.venv/bin/python foundry_preflight.py --run -- --folder ./samples --dry-run
+.venv/bin/python foundry_preflight.py --run -- --folder ./samples
 ```
+The first command verifies the local model and creates reports without sending
+email. The second sends email if suspicious pricing is detected. Updated
+trackers and reports are written under `output/` unless `--in-place` is used.
 
 ## Rules
 Trades match on (symbol, trade date, side). Flagged: quantity or account differences; price when
 BUY and client price > advisor price, or SELL and client price < advisor price; trades present on one side only.
-Matching/comparison is deterministic code; the LLM only extracts and orchestrates.
-Scanned pages (no text layer) are rendered to images and read by Gemma4 vision. Extraction is slow on CPU/small GPUs.
+Matching and comparison are deterministic code. PDFs must have a text layer;
+scanned PDFs currently fail extraction and are excluded from the comparison.
 
 ## Tests
 `.venv/bin/python -m pytest`
+
+## Microsoft Foundry deployment
+See [FOUNDRY_DEPLOYMENT.md](./FOUNDRY_DEPLOYMENT.md) for deployment prerequisites,
+required application changes, and hosted-agent deployment steps.
