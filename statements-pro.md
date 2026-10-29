@@ -54,7 +54,7 @@ Statement PDFs (statements/)        Arbor client trades Excel (client_trades/)
 
 ```
 python make_samples.py                                   # sample data in ./samples
-python foundry_preflight.py --run -- --folder samples --dry-run
+python precheck/foundry_preflight.py --run -- --folder samples --dry-run
 ```
 
 Folder layout under `--folder`: `statements/*.pdf`, `client_trades/*.xlsx`, `master/*.xlsx`.

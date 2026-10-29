@@ -4,7 +4,7 @@ import asyncio
 from recon.config import Settings
 from recon.console import setup_logging
 from recon.pipeline import run_pipeline
-from recon.server_check import ServerCheck
+from precheck.server_check import ServerCheck
 
 
 async def main():

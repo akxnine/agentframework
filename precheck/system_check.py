@@ -2,12 +2,12 @@
 """System + Foundry Local model preflight with a live terminal dashboard.
 
 Usage:
-  python system_check.py                 # one-shot dashboard, then one dashboard per cached model
+  python precheck/system_check.py                 # one-shot dashboard, then one dashboard per cached model
                                          # (stops/restarts the Foundry server; it is stopped at the end)
-  python system_check.py --no-models     # skip the per-model dashboards (server left untouched)
-  python system_check.py -v              # also trace raw output of every command run
-  python system_check.py --watch         # refresh every 2s until Ctrl+C
-  python system_check.py --model NAME    # override FOUNDRY_MODEL
+  python precheck/system_check.py --no-models     # skip the per-model dashboards (server left untouched)
+  python precheck/system_check.py -v              # also trace raw output of every command run
+  python precheck/system_check.py --watch         # refresh every 2s until Ctrl+C
+  python precheck/system_check.py --model NAME    # override FOUNDRY_MODEL
 Exit code is 1 if any check is critical (e.g. server down, model missing, very low free RAM).
 """
 import argparse
@@ -142,11 +142,11 @@ def advice(model: str, ram_free: float, swap_used: float, gpu_list: list[dict], 
                   "(macOS) or `winget install Microsoft.FoundryLocal` (Windows)."))
     if not st["up"]:
         a.append(("crit", "Foundry Local server not reachable.",
-                  "`foundry server start` (or `foundry server restart`), then `python foundry_preflight.py --run`. "
+                  "`foundry server start` (or `foundry server restart`), then `python precheck/foundry_preflight.py --run`. "
                   "Check `foundry server logs` if it keeps failing."))
     elif not model:
         a.append(("warn", "FOUNDRY_MODEL not set.",
-                  "Pass `--model <alias>` or run `python foundry_preflight.py --run` to export it."))
+                  "Pass `--model <alias>` or run `python precheck/foundry_preflight.py --run` to export it."))
     elif not matches(model, st["served"]):
         a.append(("crit", f"Model '{model}' is not served ({len(st['served'])} catalog entries served).",
                   f"`foundry model ls` to find the alias, then `foundry model download {model}` and "

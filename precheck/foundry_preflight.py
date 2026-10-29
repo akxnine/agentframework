@@ -2,9 +2,9 @@
 """Foundry Local preflight: ensure server + model are ready, test a request, show a dashboard.
 
 Usage:
-  python foundry_preflight.py [--model NAME] [--prompt "..."]   # default: first cached of phi-4-mini, gemma-4-e2b-it
-  python foundry_preflight.py --run [-- main.py args]   # preflight, then run the reconciliation with env set
-  eval "$(python foundry_preflight.py --print-env)"      # export FOUNDRY_HOST / FOUNDRY_MODEL in your shell
+  python precheck/foundry_preflight.py [--model NAME] [--prompt "..."]   # default: first cached of phi-4-mini, gemma-4-e2b-it
+  python precheck/foundry_preflight.py --run [-- main.py args]   # preflight, then run the reconciliation with env set
+  eval "$(python precheck/foundry_preflight.py --print-env)"      # export FOUNDRY_HOST / FOUNDRY_MODEL in your shell
 Exit code is 0 only if every check passes. FOUNDRY_HOST and FOUNDRY_MODEL are only exported after all checks pass.
 """
 import argparse
@@ -261,7 +261,7 @@ def main() -> int:
     if args.print_env:
         print(f"export FOUNDRY_HOST={shlex.quote(url)}\nexport FOUNDRY_MODEL={shlex.quote(model_id)}")
     if args.run:
-        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"), *args.main_args]
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"), *args.main_args]
         log.info("Starting: %s", " ".join(cmd))
         return subprocess.call(cmd, env=os.environ.copy())
     return 0

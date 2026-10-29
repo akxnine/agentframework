@@ -19,8 +19,8 @@ application permission and admin consent.
 Folder layout: `<folder>/statements/*.pdf`, `<folder>/client_trades/*.xlsx`,
 and `<folder>/master/*.xlsx`.
 ```bash
-.venv/bin/python foundry_preflight.py --run -- --folder ./samples --dry-run
-.venv/bin/python foundry_preflight.py --run -- --folder ./samples
+.venv/bin/python precheck/foundry_preflight.py --run -- --folder ./samples --dry-run
+.venv/bin/python precheck/foundry_preflight.py --run -- --folder ./samples
 ```
 The first command verifies the local model and creates reports without sending
 email. The second sends email if suspicious pricing is detected. Updated

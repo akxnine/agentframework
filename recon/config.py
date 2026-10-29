@@ -23,7 +23,7 @@ def _live_foundry_urls() -> list[str] | None:
 
 @dataclass
 class Settings:
-    # Set by foundry_preflight.py; no defaults so a run never starts against an unverified host/model.
+    # Set by precheck/foundry_preflight.py; no defaults so a run never starts against an unverified host/model.
     foundry_host: str = field(default_factory=lambda: os.getenv("FOUNDRY_HOST", "").rstrip("/"))
     model: str = field(default_factory=lambda: os.getenv("FOUNDRY_MODEL", ""))
     docs_folder: str = field(default_factory=lambda: os.getenv("DOCS_FOLDER", "./samples"))
@@ -45,7 +45,7 @@ class Settings:
         missing = [n for n, v in [("FOUNDRY_HOST", self.foundry_host), ("FOUNDRY_MODEL", self.model)] if not v]
         if missing:
             raise RuntimeError(
-                f"Missing {', '.join(missing)}. Run `python foundry_preflight.py --run` "
+                f"Missing {', '.join(missing)}. Run `python precheck/foundry_preflight.py --run` "
                 "(it verifies the server/model, exports both variables, then starts the process)."
             )
 
@@ -53,7 +53,7 @@ class Settings:
         """Verify the configured server is up, serves the model, and (when the foundry CLI is available) that
         the configured port is the one the running server reports. Raises RuntimeError on any failure."""
         self.require_model_env()
-        redo = "Re-run `python foundry_preflight.py --run` to refresh FOUNDRY_HOST/FOUNDRY_MODEL."
+        redo = "Re-run `python precheck/foundry_preflight.py --run` to refresh FOUNDRY_HOST/FOUNDRY_MODEL."
         port = urlparse(self.foundry_host).port
         if not port:
             raise RuntimeError(f"FOUNDRY_HOST '{self.foundry_host}' has no explicit port. {redo}")

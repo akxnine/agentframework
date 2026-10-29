@@ -2,7 +2,7 @@
 
 Only what you can actually change. Foundry Local runs ONNX Runtime GenAI models, not GGUF, and exposes no KV-cache-quantization or Flash Attention switch.
 
-Run `python system_check.py` (or `--watch`) to see your resources and model config.
+Run `python precheck/system_check.py` (or `--watch`) to see your resources and model config.
 
 ## 1. Model selection (biggest lever)
 - Pick the smallest model that extracts accurately: 1.5B–8B. Compare with `foundry model ls`.
@@ -41,7 +41,7 @@ Run `python system_check.py` (or `--watch`) to see your resources and model conf
 ## 6. Pipeline-level (this repo)
 - Add `max_tokens` and chunking in `recon/extraction.py`.
 - Cache extracted JSON (`output/json/`) and skip re-extraction for unchanged PDFs.
-- Run `foundry_preflight.py` once, then reuse the exported `FOUNDRY_HOST` / `FOUNDRY_MODEL`.
+- Run `precheck/foundry_preflight.py` once, then reuse the exported `FOUNDRY_HOST` / `FOUNDRY_MODEL`.
 
 ## Checklist
 | Item | Target |

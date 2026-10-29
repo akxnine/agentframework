@@ -1,6 +1,6 @@
 """Lightweight Foundry server check for main.py, shown as a small dashboard.
 
-foundry_preflight.py stays the standalone, detailed test; this class only verifies the server is usable and
+precheck/foundry_preflight.py stays the standalone, detailed test; this class only verifies the server is usable and
 falls back to the preflight (to start/load the model) when it is not.
 """
 import os
@@ -12,10 +12,10 @@ import time
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import Settings
-from .console import console
+from recon.config import Settings
+from recon.console import console
 
-PREFLIGHT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "foundry_preflight.py")
+PREFLIGHT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "foundry_preflight.py")
 
 
 class ServerCheck:
@@ -46,11 +46,11 @@ class ServerCheck:
         self.show()
 
     def _run_preflight(self) -> None:
-        with console.status("[yellow]Server not ready, running foundry_preflight.py ...[/]"):
+        with console.status("[yellow]Server not ready, running precheck/foundry_preflight.py ...[/]"):
             proc = subprocess.run([sys.executable, PREFLIGHT, "--print-env"], stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True)
         if proc.returncode != 0:
-            raise SystemExit("Preflight failed; run `python foundry_preflight.py` for details.")
+            raise SystemExit("Preflight failed; run `python precheck/foundry_preflight.py` for details.")
         env = {}
         for line in proc.stdout.splitlines():
             if line.startswith("export "):
