@@ -170,6 +170,43 @@ def gpus_discrete(gpu_list: list[dict]) -> list[dict]:
     return [g for g in gpu_list if g["kind"] == "NVIDIA"]
 
 
+# metric -> (minimum, recommended, unit); for phi-4-mini / gemma-4-e2b-it class int4 models
+REQUIREMENTS = {
+    "CPU physical cores": (4, 8, ""),
+    "RAM total": (8, 16, "GB"),
+    "RAM available": (3, 6, "GB"),
+    "Disk free": (10, 20, "GB"),
+    "GPU memory": (4, 8, "GB"),
+}
+
+
+def requirements_table(vm, disk, gpu_list: list[dict]) -> Table:
+    """Current vs minimum/recommended values; GPU memory is total VRAM (unified memory on Apple Silicon)."""
+    gpu_total = max((g["total"] for g in gpu_list), default=0.0)
+    current = {
+        "CPU physical cores": float(psutil.cpu_count(logical=False) or psutil.cpu_count() or 0),
+        "RAM total": vm.total / GB,
+        "RAM available": vm.available / GB,
+        "Disk free": disk.free / GB,
+        "GPU memory": gpu_total,
+    }
+    t = Table(expand=True)
+    for col, just in (("Metric", "left"), ("Current", "right"), ("Minimum", "right"), ("Recommended", "right"),
+                      ("Status", "center")):
+        t.add_column(col, justify=just)
+    for name, (lo, rec, unit) in REQUIREMENTS.items():
+        cur = current[name]
+        if cur < lo:
+            status = "[red]below minimum[/]"
+        elif cur < rec:
+            status = "[yellow]meets minimum[/]"
+        else:
+            status = "[green]recommended[/]"
+        u = f" {unit}" if unit else ""
+        t.add_row(name, f"{cur:.1f}{u}", f"{lo}{u}", f"{rec}{u}", status)
+    return t
+
+
 def build(model: str, host: str) -> tuple[Group, bool]:
     vm, sw = psutil.virtual_memory(), psutil.swap_memory()
     disk = shutil.disk_usage(os.path.expanduser("~"))
@@ -215,6 +252,8 @@ def build(model: str, host: str) -> tuple[Group, bool]:
             tips.add_row("", Text("→ Fix: " + fix, style="cyan"))
 
     body = Group(Panel(sysinfo, title="System resources", border_style="cyan"),
+                 Panel(requirements_table(vm, disk, gpu_list), title="Minimum / recommended values",
+                       border_style="green"),
                  Panel(cfg, title="Foundry Local / model config", border_style="magenta"), cache,
                  Panel(tips, title="Findings", border_style="yellow"),
                  Text(time.strftime("updated %H:%M:%S"), style="dim", justify="right"))

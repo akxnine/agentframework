@@ -2,7 +2,7 @@
 """Foundry Local preflight: ensure server + model are ready, test a request, show a dashboard.
 
 Usage:
-  python foundry_preflight.py [--model gemma-4-e2b-it] [--prompt "..."]
+  python foundry_preflight.py [--model NAME] [--prompt "..."]   # default: first cached of phi-4-mini, gemma-4-e2b-it
   python foundry_preflight.py --run [-- main.py args]   # preflight, then run the reconciliation with env set
   eval "$(python foundry_preflight.py --print-env)"      # export FOUNDRY_HOST / FOUNDRY_MODEL in your shell
 Exit code is 0 only if every check passes. FOUNDRY_HOST and FOUNDRY_MODEL are only exported after all checks pass.
@@ -22,7 +22,8 @@ from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
 
-DEFAULT_MODEL = "gemma-4-e2b-it"
+# Preference order; the first one that is cached locally is used.
+MODEL_PREFERENCE = ["phi-4-mini", "gemma-4-e2b-it"]
 console = Console()
 logging.basicConfig(
     level=logging.INFO,
@@ -117,12 +118,15 @@ def loaded_ids(alias: str) -> list[str]:
 
 
 @step("2. Model cached")
-def find_cached(name: str):
-    """Run `foundry model list --cached` and return (alias, [cached variant ids]) for the requested model."""
+def find_cached(names: list[str]):
+    """Run `foundry model list --cached` and return (alias, [cached variant ids]) for the first cached model in `names`."""
     entries = run_json("model", "list", "--cached").get("models", [])
-    match = [m for m in entries if name in (m.get("alias"), m.get("id"))]
-    if not match:
-        raise RuntimeError(f"{name} is not cached; run `foundry model download {name}` first")
+    for name in names:
+        match = [m for m in entries if name in (m.get("alias"), m.get("id"))]
+        if match:
+            break
+    else:
+        raise RuntimeError(f"none of {', '.join(names)} is cached; run `foundry model download {names[0]}` first")
     alias = match[0]["alias"]
     ids = [m["id"] for m in match]
     return (alias, ids), f"alias={alias}, cached: {', '.join(ids)}"
@@ -224,7 +228,7 @@ def dashboard(url, model_id, reply):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", help="use only this model instead of the preference order: " + ", ".join(MODEL_PREFERENCE))
     ap.add_argument("--prompt", default="Reply with one short sentence confirming you are working.")
     ap.add_argument("-v", "--verbose", action="store_true", help="log raw CLI output")
     ap.add_argument("--run", action="store_true", help="after a successful preflight, run main.py with the env set")
@@ -242,7 +246,7 @@ def main() -> int:
     url = model_id = reply = None
     url = ensure_server()
     if url:
-        found = find_cached(args.model)
+        found = find_cached([args.model] if args.model else MODEL_PREFERENCE)
         if found:
             model_id = load_model(*found)
     if url and model_id:

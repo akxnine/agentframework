@@ -9,8 +9,8 @@ Trade comparison is deterministic; the model is used for statement extraction.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
-Install the Foundry Local CLI, then cache the `gemma-4-e2b-it` model with
-`foundry model download gemma-4-e2b-it`. Configure `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`,
+Install the Foundry Local CLI, then cache `phi-4-mini` (preferred) and/or `gemma-4-e2b-it` with
+`foundry model download <name>`; the preflight uses the first one that is cached. Configure `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`,
 `GRAPH_CLIENT_SECRET`, `GRAPH_SENDER`, and `EMAIL_TO` in the environment or a
 local `.env` file. Graph email requires an Entra app with **Mail.Send**
 application permission and admin consent.
