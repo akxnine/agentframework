@@ -9,6 +9,7 @@ from .models import Trade
 
 CLIENT_COLS = ["Account Number", "Client Name", "Symbol", "Trade Date", "Side", "Quantity", "Price"]
 OUT_COLS = ["Review Date", "Number of Trades", "Suspicious Activity"]
+COMPLIANCE_COLS = ["Compliance Status", "Reviewed By", "Reviewed At", "Compliance Notes"]
 
 
 def norm_acct(a) -> str:
@@ -44,6 +45,13 @@ def read_client_trades(path: str) -> list[Trade]:
     return trades
 
 
+def _ensure_columns(ws, h: dict[str, int], names: list[str]) -> None:
+    for name in names:
+        if name.lower() not in h:
+            h[name.lower()] = ws.max_column + 1
+            ws.cell(row=1, column=h[name.lower()], value=name).font = copy(ws.cell(row=1, column=1).font)
+
+
 def update_tracker(path: str, out_path: str, results: dict[str, tuple[int, bool]], review_date: str) -> list[str]:
     """Write Review Date / Number of Trades / Suspicious Activity for accounts in `results`
     (normalised account -> (trade count, suspicious)). Returns the accounts updated."""
@@ -55,10 +63,7 @@ def update_tracker(path: str, out_path: str, results: dict[str, tuple[int, bool]
     h = _headers(ws)
     if "account number" not in h:
         raise ValueError(f"{os.path.basename(path)}: no 'Account Number' column")
-    for name in OUT_COLS:
-        if name.lower() not in h:
-            h[name.lower()] = ws.max_column + 1
-            ws.cell(row=1, column=h[name.lower()], value=name).font = copy(ws.cell(row=1, column=1).font)
+    _ensure_columns(ws, h, OUT_COLS)
     updated = []
     for row in range(2, ws.max_row + 1):
         acct = norm_acct(ws.cell(row=row, column=h["account number"]).value or "")
@@ -70,6 +75,31 @@ def update_tracker(path: str, out_path: str, results: dict[str, tuple[int, bool]
             updated.append(ws.cell(row=row, column=h["account number"]).value)
     wb.save(out_path)
     return updated
+
+
+def update_compliance_status(path: str, account: str, status: str, reviewer: str, reviewed_at: str,
+                             notes: str = "") -> bool:
+    """Write the compliance decision for one account's row into a tracker workbook in place.
+    Used by the compliance watcher after a decision is parsed from an officer's email reply.
+    Returns True if a matching row was found and updated."""
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    h = _headers(ws)
+    if "account number" not in h:
+        raise ValueError(f"{os.path.basename(path)}: no 'Account Number' column")
+    _ensure_columns(ws, h, COMPLIANCE_COLS)
+    target = norm_acct(account)
+    found = False
+    for row in range(2, ws.max_row + 1):
+        if norm_acct(ws.cell(row=row, column=h["account number"]).value or "") == target:
+            ws.cell(row=row, column=h["compliance status"], value=status)
+            ws.cell(row=row, column=h["reviewed by"], value=reviewer)
+            ws.cell(row=row, column=h["reviewed at"], value=reviewed_at)
+            ws.cell(row=row, column=h["compliance notes"], value=notes)
+            found = True
+    if found:
+        wb.save(path)
+    return found
 
 
 def tracker_accounts(path: str) -> set[str]:

@@ -1,4 +1,5 @@
 """Interactive dashboard: streamlit run dashboard_app.py"""
+import asyncio
 import glob
 import os
 import time
@@ -9,11 +10,11 @@ import plotly.express as px
 import streamlit as st
 from openpyxl import load_workbook
 
-from recon import server
-from recon.config import Settings
-from recon.costs import LOCAL, PRICING, cost, scan_inputs
-from recon.events import read_events
-from recon.runner import STEPS, RunController
+from orchestrator.config import Settings
+from orchestrator.costs import DEFAULT_PRICING, PRICING, cost, scan_inputs
+from orchestrator.events import read_events
+from orchestrator.ledger import ComplianceLedger
+from orchestrator.runner import RunController
 
 st.set_page_config(page_title="Statement Reconciliation", page_icon="📊", layout="wide")
 
@@ -33,53 +34,48 @@ def cached_scan(folder: str) -> dict:
     return scan_inputs(folder)
 
 
-@st.cache_data(ttl=15)
-def cached_server_status() -> dict:
-    return server.status()
-
-
 def run_files() -> list[str]:
     return sorted(glob.glob(os.path.join(RUNS, "*.jsonl")), reverse=True)
 
 
 def summarize(evs: list[dict]) -> dict:
-    """Fold the event stream into the state the UI renders."""
-    s = {"steps": {}, "current": None, "logs": [], "docs": [], "disc": [], "metrics": {}, "progress": None,
-         "status": "idle", "result": "", "start": None, "end": None, "plan": None, "server": {},
-         "client_files": [], "trackers": [], "reports": None}
+    """Fold the orchestrator's event stream into the state the UI renders."""
+    s = {"transcript": [], "docs": [], "disc": [], "metrics": {}, "status": "idle", "result": "",
+        "start": None, "end": None, "plan": None, "client_files": [], "trackers": [], "reports": None,
+        "compliance_cases": [], "logs": []}
     for e in evs:
         k = e["kind"]
         if k == "run_start":
             s["status"], s["start"] = "running", e["ts"]
-        elif k == "step":
-            if s["current"] is not None:
-                s["steps"][s["current"]]["done"] = e["ts"]
-            s["current"] = e["n"]
-            s["steps"][e["n"]] = {"title": e["title"], "start": e["ts"], "done": None}
         elif k == "log":
             s["logs"].append(f"{time.strftime('%H:%M:%S', time.localtime(e['ts']))} {e['level']:<7} {e['msg']}")
+        elif k == "agent_text":
+            s["transcript"].append({"t": e["ts"], "type": "text", "text": e["text"]})
+        elif k == "tool_use":
+            s["transcript"].append({"t": e["ts"], "type": "tool_use", "name": e["name"], "input": e["input"]})
+        elif k == "tool_result":
+            s["transcript"].append({"t": e["ts"], "type": "tool_result", "is_error": e.get("is_error", False),
+                                    "content": e["content"]})
         elif k == "doc":
             s["docs"].append(e)
-        elif k == "progress":
-            s["progress"] = e
         elif k == "discrepancies":
             s["disc"] = e["rows"]
         elif k == "metrics":
             s["metrics"] = e
         elif k == "plan":
             s["plan"] = e
-        elif k == "server":
-            s["server"] = e
         elif k == "client_file":
             s["client_files"].append(e)
         elif k == "tracker":
             s["trackers"].append(e)
         elif k == "reports":
             s["reports"] = e
-        elif k == "run_end":
-            s["status"], s["result"], s["end"] = e["status"], e["result"], e["ts"]
-            if s["current"] is not None:
-                s["steps"][s["current"]]["done"] = e["ts"]
+        elif k == "compliance_case":
+            s["compliance_cases"].append(e)
+        elif k in ("agent_result", "run_end"):
+            s["status"] = "failed" if k == "run_end" and e.get("status") == "failed" else (
+                "cancelled" if k == "run_end" and e.get("status") == "cancelled" else "done")
+            s["result"], s["end"] = e.get("result", s["result"]), e["ts"]
     return s
 
 
@@ -88,40 +84,16 @@ def file_link(path: str) -> str:
 
 
 def doc_frame(s: dict, pricing: str) -> pd.DataFrame:
-    """One row per planned PDF (PENDING/RUNNING until its result event arrives), with cost for the chosen pricing."""
-    done = {d["file"]: d for d in s["docs"]}
-    names = [d["file"] for d in (s["plan"] or {}).get("docs", [])] or list(done)
-    cur = s["progress"]["current"] if s["progress"] and s["status"] == "running" else None
     rows = []
-    for i, name in enumerate(names, 1):
-        d = done.get(name)
-        if d is None:
-            rows.append({"#": i, "File": name, "Status": "⏳ RUNNING" if name == cur else "⬜ PENDING"})
-            continue
+    for i, d in enumerate(s["docs"], 1):
         rows.append({
-            "#": i, "File": name, "Status": "✅ OK" if d["status"] == "OK" else "❌ FAILED", "Pages": d["pages"],
-            "Tries": d["attempts"], "Tokens in": d["prompt_tokens"], "Tokens out": d["completion_tokens"],
-            "Read (s)": round(d["read_secs"], 2), "LLM (s)": round(d["llm_secs"], 1),
-            "Total (s)": round(d["total_secs"], 1), "Statements": d["statements"], "Trades": d["trades"],
-            f"Cost ($) [{pricing}]": round(cost(d["prompt_tokens"], d["completion_tokens"], pricing), 4),
-            "Notes": d["error"] or ", ".join(d["accounts"]),
+            "#": i, "File": d["file"], "Status": "✅ OK" if d["status"] == "OK" else "❌ FAILED",
+            "Statements": d.get("statements", 0), "Trades": d.get("trades", 0),
+            "Tokens in": d.get("prompt_tokens", 0), "Tokens out": d.get("completion_tokens", 0),
+            f"Cost ($) [{pricing}]": round(cost(d.get("prompt_tokens", 0), d.get("completion_tokens", 0), pricing), 4),
+            "Notes": d.get("error") or ", ".join(d.get("accounts", [])),
         })
     return pd.DataFrame(rows)
-
-
-def stepper(s: dict) -> None:
-    cols = st.columns(len(STEPS))
-    for n, col in zip(STEPS, cols):
-        info = s["steps"].get(n)
-        if info is None:
-            icon, note = "⬜", "pending"
-        elif info["done"] is None:
-            icon, note = "⏳", f"{time.time() - info['start']:.0f}s…"
-        elif s["status"] in ("failed", "cancelled") and n == s["current"]:
-            icon, note = "❌", f"{info['done'] - info['start']:.1f}s"
-        else:
-            icon, note = "✅", f"{info['done'] - info['start']:.1f}s"
-        col.markdown(f"**{icon} {n}. {STEPS[n]}**  \n{note}")
 
 
 def prerun_panel(scan: dict, title: str) -> None:
@@ -151,13 +123,28 @@ def result_row(s: dict, run_id: str) -> None:
     if s["status"] == "failed":
         st.error(s["result"])
         return
-    lines = [ln for ln in s["result"].splitlines() if not ln.startswith(("Excel:", "PDF:"))]
     with st.container(border=True):
-        st.markdown("**Result:** " + " ".join(lines))
+        st.markdown("**Result:** " + s["result"])
         rep = s["reports"]
         if rep:
             st.markdown(f"**Excel:** {file_link(rep['excel'])}  \n**PDF:** {file_link(rep['pdf'])}")
             download_buttons([rep["excel"], rep["pdf"]], f"res_{run_id}")
+
+
+def transcript_view(s: dict) -> None:
+    st.markdown("##### Orchestrator transcript")
+    if not s["transcript"]:
+        st.caption("No activity yet.")
+        return
+    for item in s["transcript"][-150:]:
+        ts = time.strftime("%H:%M:%S", time.localtime(item["t"]))
+        if item["type"] == "text":
+            st.markdown(f"`{ts}` 🧠 {item['text']}")
+        elif item["type"] == "tool_use":
+            st.markdown(f"`{ts}` 🔧 **{item['name']}**`({item['input']})`")
+        elif item["type"] == "tool_result":
+            icon = "❌" if item["is_error"] else "✅"
+            st.markdown(f"`{ts}` {icon} _{item['content']}_")
 
 
 def live_view(path: str | None, was_running: bool, pricing: str, folder: str) -> None:
@@ -173,40 +160,36 @@ def live_view(path: str | None, was_running: bool, pricing: str, folder: str) ->
     elif not ctl.running:
         prerun_panel(cached_scan(folder), "Pre-run check (current docs folder)")
 
-    stepper(s)
-    p = s["progress"]
-    if p and s["current"] == 1 and s["status"] == "running":
-        st.progress(p["done"] / max(p["total"], 1), text=f"Extracting {p['current']} ({p['done']}/{p['total']} PDFs done)")
     m = s["metrics"]
     if m:
-        for col, (label, key) in zip(st.columns(5), [("Statements", "statements"), ("Advisor trades", "advisor_trades"),
+        for col, (label, key) in zip(st.columns(4), [("Advisor trades", "advisor_trades"),
                                                      ("Client trades", "client_trades"), ("Discrepancies", "discrepancies"),
                                                      ("Suspicious", "suspicious")]):
-            col.metric(label, m[key])
+            col.metric(label, m.get(key, 0))
 
-    # Step details appear as each step completes
+    transcript_view(s)
+
     df = doc_frame(s, pricing)
     if not df.empty:
-        st.markdown("##### Step 1 · Statement extraction")
+        st.markdown("##### Statement extraction")
         st.dataframe(df, hide_index=True, width="stretch")
-        docs = s["docs"]
-        st.caption(f"{sum(d['trades'] for d in docs)} trades · "
-                   f"{sum(d['prompt_tokens'] + d['completion_tokens'] for d in docs):,} tokens · est. cost "
-                   f"${sum(cost(d['prompt_tokens'], d['completion_tokens'], pricing) for d in docs):.4f} ({pricing})")
     if s["client_files"]:
-        st.markdown("##### Step 2 · Client trades loaded")
+        st.markdown("##### Client trades loaded")
         st.dataframe(pd.DataFrame(s["client_files"]).drop(columns=["kind", "ts"]), hide_index=True, width="stretch")
     if s["disc"]:
-        st.markdown("##### Step 3 · Discrepancies")
+        st.markdown("##### Discrepancies")
         st.dataframe(pd.DataFrame(s["disc"]), hide_index=True, width="stretch")
     if s["trackers"]:
-        st.markdown("##### Step 4 · MasterPro trackers updated")
+        st.markdown("##### MasterPro trackers updated")
         st.dataframe(pd.DataFrame(s["trackers"]).drop(columns=["kind", "ts"]), hide_index=True, width="stretch")
+    if s["compliance_cases"]:
+        st.markdown("##### Compliance cases opened this run")
+        st.dataframe(pd.DataFrame(s["compliance_cases"]).drop(columns=["kind", "ts"]), hide_index=True, width="stretch")
 
     if s["result"]:
         result_row(s, run_id)
 
-    with st.expander(f"Logs ({len(s['logs'])} lines)", expanded=False):
+    with st.expander(f"Raw log ({len(s['logs'])} lines)", expanded=False):
         st.code("\n".join(s["logs"][-200:]) or "No log yet", language="text", height=220)
 
     if was_running and not ctl.running:
@@ -224,25 +207,23 @@ def metrics_tab(s: dict, pricing: str) -> None:
         return
     df = doc_frame(s, pricing)
     docs = pd.DataFrame(s["docs"])
-    pin, pout = int(docs.prompt_tokens.sum()), int(docs.completion_tokens.sum())
-    st.caption(f"Run model: **{s['server'].get('model', 'unknown')}** (local Foundry, no per-token charge). "
-               f"Cost columns use the pricing selected in the sidebar: **{pricing}**.")
-    a, b, c, d, e = st.columns(5)
+    pin = int(docs.get("prompt_tokens", pd.Series(dtype=int)).sum())
+    pout = int(docs.get("completion_tokens", pd.Series(dtype=int)).sum())
+    st.caption(f"Extraction model: **{Settings().model}** (Claude, via the Agent SDK orchestrator). "
+              f"Cost columns use the pricing selected in the sidebar: **{pricing}**.")
+    a, b, c = st.columns(3)
     a.metric("PDFs OK", f"{(docs.status == 'OK').sum()}/{len(docs)}")
     b.metric("Tokens in / out", f"{pin:,} / {pout:,}")
-    c.metric("LLM time", f"{docs.llm_secs.sum():.1f}s")
-    d.metric("Retries", int((docs.attempts - 1).clip(lower=0).sum()))
-    e.metric(f"Est. cost ({pricing})", f"${cost(pin, pout, pricing):.4f}")
+    c.metric(f"Est. cost ({pricing})", f"${cost(pin, pout, pricing):.4f}")
     st.dataframe(df, hide_index=True, width="stretch")
     st.markdown("##### Cost if this run used a different model")
     st.dataframe(pd.DataFrame([{"Model": n, "$/1M in": pr[0], "$/1M out": pr[1],
                                 "Est. cost for this run ($)": round(cost(pin, pout, n), 4)}
                                for n, pr in PRICING.items()]), hide_index=True, width="stretch")
-    st.caption("Prices are approximate list prices (edit `recon/costs.py`). Local models cost $0 per token.")
-    left, right = st.columns(2)
-    left.plotly_chart(px.bar(docs, x="file", y=["read_secs", "llm_secs"], title="Time per PDF (s)"), width="stretch")
-    right.plotly_chart(px.bar(docs, x="file", y=["prompt_tokens", "completion_tokens"], title="Tokens per PDF"),
-                       width="stretch")
+    st.caption("Prices are approximate list prices (edit `orchestrator/costs.py`).")
+    if "prompt_tokens" in docs:
+        st.plotly_chart(px.bar(docs, x="file", y=["prompt_tokens", "completion_tokens"], title="Tokens per PDF"),
+                        width="stretch")
 
 
 def discrepancies_tab(s: dict) -> None:
@@ -266,10 +247,13 @@ def read_report(path: str, mtime: float) -> dict:
     summary = {str(r[0]): r[1] for r in wb["Summary"].iter_rows(values_only=True) if r and r[0] is not None}
 
     def sheet(name: str) -> pd.DataFrame:
+        if name not in wb.sheetnames:
+            return pd.DataFrame()
         rows = list(wb[name].iter_rows(values_only=True))
         return pd.DataFrame(rows[1:], columns=rows[0]) if rows else pd.DataFrame()
 
-    return {"summary": summary, "discrepancies": sheet("Discrepancies"), "unmatched": sheet("Unmatched")}
+    return {"summary": summary, "discrepancies": sheet("Discrepancies"), "unmatched": sheet("Unmatched"),
+            "notes": sheet("Salesforce Notes")}
 
 
 def reports_tab() -> None:
@@ -306,22 +290,24 @@ def reports_tab() -> None:
         st.dataframe(data["discrepancies"], hide_index=True, width="stretch")
         st.markdown("##### Unmatched trades")
         st.dataframe(data["unmatched"], hide_index=True, width="stretch")
+        if not data["notes"].empty:
+            st.markdown("##### Salesforce notes")
+            st.dataframe(data["notes"], hide_index=True, width="stretch")
 
 
 def history_tab(pricing: str) -> None:
     rows = []
     for f in run_files():
         s = summarize(read_events(f))
-        pin = sum(d["prompt_tokens"] for d in s["docs"])
-        pout = sum(d["completion_tokens"] for d in s["docs"])
+        pin = sum(d.get("prompt_tokens", 0) for d in s["docs"])
+        pout = sum(d.get("completion_tokens", 0) for d in s["docs"])
         rows.append({
             "Run": os.path.basename(f)[:-6],
             "Started": pd.to_datetime(s["start"], unit="s") if s["start"] else None,
-            "Status": s["status"], "Model": s["server"].get("model", ""),
+            "Status": s["status"],
             "Duration (s)": round(s["end"] - s["start"], 1) if s["end"] and s["start"] else None,
             "PDFs": len(s["docs"]), "Tokens": pin + pout, f"Cost ($) [{pricing}]": round(cost(pin, pout, pricing), 4),
-            "Statements": s["metrics"].get("statements"), "Discrepancies": s["metrics"].get("discrepancies"),
-            "Suspicious": s["metrics"].get("suspicious"),
+            "Discrepancies": s["metrics"].get("discrepancies"), "Suspicious": s["metrics"].get("suspicious"),
         })
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -329,72 +315,30 @@ def history_tab(pricing: str) -> None:
         st.info("No runs yet.")
 
 
-def models_frame(rows: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame([{"Alias": m.get("alias"), "Id": m.get("id"), "Type": m.get("type"),
-                          "Device": m.get("device"), "Size (MB)": m.get("fileSizeMb"),
-                          "Tool calling": m.get("supportsToolCalling"), "License": m.get("license")} for m in rows])
-
-
-def server_tab() -> None:
-    busy = ctl.running
-    c = st.columns([1, 1, 1, 1, 3])
-    action = None
-    if c[0].button("▶ Start", disabled=busy, width="stretch"):
-        action = ("Starting server and loading model (this can take a while)...", server.start)
-    if c[1].button("⏹ Stop", disabled=busy, width="stretch"):
-        action = ("Stopping server...", server.stop)
-    if c[2].button("🔄 Restart", disabled=busy, width="stretch"):
-        action = ("Restarting server...", server.restart)
-    if c[3].button("↻ Refresh", width="stretch"):
-        cached_server_status.clear()
-    if action:
-        with st.spinner(action[0]):
-            ok, msg = action[1]()
-        cached_server_status.clear()
-        st.session_state["server_msg"] = (ok, msg)
-    if busy:
-        st.caption("Server controls are disabled while a run is in progress.")
-    if "server_msg" in st.session_state:
-        ok, msg = st.session_state["server_msg"]
-        (st.success if ok else st.error)(msg)
-
-    with st.spinner("Reading server status..."):
-        sv = cached_server_status()
-    k = st.columns(4)
-    k[0].metric("State", sv["state"] or "unknown")
-    k[1].metric("API", "reachable" if sv["api_ok"] else "down")
-    k[2].metric("Model served", "yes" if sv["model_served"] else "no")
-    k[3].metric("API latency", f"{sv['latency_ms']:.0f} ms" if sv["latency_ms"] is not None else "-")
-    if not sv["port_match"]:
-        st.warning("FOUNDRY_HOST port differs from the running server. Use Restart to refresh it.")
-
-    st.markdown("##### Server details")
-    endpoint = sv["env_host"] or (sv["urls"][0] if sv["urls"] else "-")
-    st.dataframe(pd.DataFrame([
-        ("Foundry CLI", sv["cli_version"]),
-        ("Process running", "yes" if sv["running"] else "no"),
-        ("State", sv["state"] or "unknown"),
-        ("Server URL(s)", ", ".join(sv["urls"]) or "-"),
-        ("FOUNDRY_HOST (env)", sv["env_host"] or "not set"),
-        ("FOUNDRY_MODEL (env)", sv["env_model"] or "not set"),
-        ("Port matches running server", "yes" if sv["port_match"] else "NO"),
-        ("OpenAI-compatible endpoint", f"{endpoint}/v1"),
-        ("Models in API catalog", len(sv["served"])),
-        ("Loaded models", len(sv["loaded"])),
-        ("Cached models", len(sv["cached"])),
-        ("Last checked", time.strftime("%H:%M:%S", time.localtime(sv["checked_at"]))),
-    ], columns=["Property", "Value"]).astype(str), hide_index=True, width="stretch")
-
-    st.markdown("##### Loaded models")
-    if sv["loaded"]:
-        st.dataframe(models_frame(sv["loaded"]), hide_index=True, width="stretch")
-    else:
-        st.caption("None loaded.")
-    st.markdown("##### Cached models")
-    if sv["cached"]:
-        st.dataframe(models_frame(sv["cached"]), hide_index=True, width="stretch")
-    else:
-        st.caption("None cached.")
+def compliance_tab(settings: Settings) -> None:
+    ledger = ComplianceLedger(settings.ledger_path)
+    st.caption("Every flagged account emailed to compliance, and the decision that closed it out. "
+              "The watcher process (`python cli.py watch-compliance`) polls the mailbox and fills this "
+              "in automatically; use the button below to check once from here instead.")
+    c1, c2 = st.columns([1, 4])
+    if c1.button("📥 Check mailbox for replies now", disabled=bool(settings.require_email_env())):
+        from orchestrator.compliance_watch import process_once
+        from anthropic import AsyncAnthropic
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+        with st.spinner("Polling mailbox..."):
+            n = asyncio.run(process_once(settings, ledger, client))
+        st.success(f"Processed {n} reply(ies).") if n else st.info("No new replies.")
+    cases = ledger.list_cases()
+    if not cases:
+        st.info("No compliance cases yet. They're created automatically when a run finds suspicious pricing.")
+        return
+    df = pd.DataFrame([c.model_dump() for c in cases])
+    df["report_paths"] = df["report_paths"].apply(lambda p: ", ".join(os.path.basename(x) for x in p))
+    status_filter = st.multiselect("Status", sorted(df.status.unique()), default=sorted(df.status.unique()))
+    st.dataframe(df[df.status.isin(status_filter)], hide_index=True, width="stretch")
+    pending = (df.status == "PENDING").sum()
+    if pending:
+        st.warning(f"{pending} case(s) awaiting compliance review.")
 
 
 with st.sidebar:
@@ -402,18 +346,16 @@ with st.sidebar:
     folder = st.text_input("Docs folder", Settings().docs_folder)
     dry = st.toggle("Dry run (no email)", True)
     in_place = st.toggle("Update master trackers in place", False)
-    keep = st.toggle("Keep Foundry server running", True)
-    pricing = st.selectbox("Cost model", list(PRICING), index=list(PRICING).index(LOCAL),
-                           help="Token pricing used for cost estimates. The run itself uses the local Foundry model.")
+    pricing = st.selectbox("Cost model", list(PRICING), index=list(PRICING).index(DEFAULT_PRICING))
     scan = cached_scan(folder)
     if not ctl.running:
         if st.button("▶ Run reconciliation", type="primary", width="stretch", disabled=not scan["blocking_ok"]):
             cfg = Settings()
             cfg.docs_folder, cfg.in_place = folder, in_place
-            ctl.start(cfg, dry, keep)
+            ctl.start(cfg, dry)
             st.rerun()
         if not scan["blocking_ok"]:
-            st.caption("⚠️ Need statements, client trades and master trackers in the docs folder.")
+            st.caption("⚠️ Need statements, client trades, master trackers, and an Anthropic API key.")
     else:
         st.button("⏳ Running…", disabled=True, width="stretch")
         if st.button("⏹ Cancel", width="stretch"):
@@ -424,7 +366,7 @@ with st.sidebar:
     choice = st.selectbox("Run to view", files, format_func=lambda f: os.path.basename(f)[:-6]) if files else None
     selected = live_id or choice
 
-tabs = st.tabs(["🔴 Live", "📈 Metrics", "⚠️ Discrepancies", "📄 Reports", "🕘 History", "🖥 Server"])
+tabs = st.tabs(["🔴 Live", "📈 Metrics", "⚠️ Discrepancies", "📄 Reports", "🕘 History", "✅ Compliance"])
 state = summarize(read_events(selected)) if selected else summarize([])
 with tabs[0]:
     live_tab(selected, pricing, folder)
@@ -437,4 +379,4 @@ with tabs[3]:
 with tabs[4]:
     history_tab(pricing)
 with tabs[5]:
-    server_tab()
+    compliance_tab(Settings())

@@ -1,9 +1,10 @@
 import openpyxl
 import pymupdf
+import pytest
 
-from recon.compare import compare_trades
-from recon.models import Trade
-from recon.report import build_excel, build_pdf
+from orchestrator.compare import compare_by_account, compare_trades
+from orchestrator.models import Trade
+from orchestrator.report import build_excel, build_pdf
 
 
 def T(sym, side, qty, px, acct="A1", d="2026-01-02"):
@@ -44,9 +45,16 @@ def test_excel(tmp_path):
     assert wb["Discrepancies"].max_row == 2
 
 
+def test_excel_with_salesforce_notes(tmp_path):
+    d = compare_trades([T("X", "BUY", 1, 11)], [T("X", "BUY", 1, 10)])
+    p = build_excel(d, str(tmp_path), 1, 1, notes_by_account={"A1": "Advisor called client on 2026-10-05."})
+    wb = openpyxl.load_workbook(p)
+    assert "Salesforce Notes" in wb.sheetnames
+    assert wb["Salesforce Notes"]["B2"].value == "Advisor called client on 2026-10-05."
+
+
 def test_read_pdf_text_and_scanned(tmp_path):
-    import pytest
-    from recon.extraction import read_pdf_text
+    from orchestrator.extraction import read_pdf_text
 
     doc = pymupdf.open()
     doc.new_page().insert_text((50, 50), "Trade AAPL")
@@ -62,8 +70,7 @@ def test_read_pdf_text_and_scanned(tmp_path):
 
 
 def test_compare_by_account_and_tracker(tmp_path):
-    from recon.excel_io import update_tracker
-    from recon.pipeline import compare_by_account
+    from orchestrator.excel_io import update_tracker
 
     c = [T("X", "BUY", 1, 11, "A-1"), T("X", "BUY", 1, 10, "B-2")]
     a = [T("X", "BUY", 1, 10, "A 1"), T("X", "BUY", 1, 10, "B-2")]
@@ -81,6 +88,26 @@ def test_compare_by_account_and_tracker(tmp_path):
     ws = openpyxl.load_workbook(out).active
     assert [c.value for c in ws[2]] == ["A-1", "n", "2026-11-01", 3, "Yes"]
     assert [c.value for c in ws[3]][2:] == [None, None, None]
+
+
+def test_update_compliance_status(tmp_path):
+    from orchestrator.excel_io import update_compliance_status
+
+    wb = openpyxl.Workbook()
+    wb.active.append(["Account Number", "Client Name"])
+    wb.active.append(["A-1", "n"])
+    p = tmp_path / "m.xlsx"
+    wb.save(p)
+
+    assert update_compliance_status(str(p), "A-1", "APPROVED", "officer@firm.com", "2026-11-02T00:00:00Z",
+                                    "Looks fine.")
+    ws = openpyxl.load_workbook(p).active
+    h = {c.value: c.column for c in ws[1]}
+    row2 = {name: ws.cell(row=2, column=col).value for name, col in h.items()}
+    assert row2["Compliance Status"] == "APPROVED"
+    assert row2["Reviewed By"] == "officer@firm.com"
+    assert row2["Compliance Notes"] == "Looks fine."
+    assert not update_compliance_status(str(p), "ZZZZ", "APPROVED", "x", "y")
 
 
 def test_pdf(tmp_path):

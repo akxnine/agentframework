@@ -42,3 +42,31 @@ class Discrepancy(BaseModel):
     detail: str = ""
     client_file: str = ""
     advisor_file: str = ""
+
+
+class SalesforceNote(BaseModel):
+    """A single client<->advisor interaction pulled from Salesforce (Case, CaseComment, Task or EmailMessage)."""
+    source: Literal["Case", "CaseComment", "Task", "EmailMessage"]
+    record_id: str = ""
+    author: str = ""
+    created_at: str = ""
+    subject: str = ""
+    body: str = ""
+
+
+ComplianceStatus = Literal["PENDING", "APPROVED", "REJECTED", "NEEDS_INFO"]
+
+
+class ComplianceCase(BaseModel):
+    """One flagged account from one run, tracked through compliance review."""
+    case_id: str
+    run_id: str
+    account: str
+    status: ComplianceStatus = "PENDING"
+    created_at: str = ""
+    reviewed_at: str = ""
+    reviewer_email: str = ""
+    decision_notes: str = ""
+    report_paths: list[str] = Field(default_factory=list)
+    discrepancy_count: int = 0
+    suspicious_count: int = 0

@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .models import Discrepancy
@@ -23,7 +23,22 @@ def _sheet(ws, rows: list[Discrepancy]):
     ws.freeze_panes = "A2"
 
 
-def build_excel(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n_advisor: int) -> str:
+def _notes_sheet(ws, notes_by_account: dict[str, str]):
+    ws.append(["Account", "Salesforce notes (summarized)"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E78")
+    for account, summary in notes_by_account.items():
+        ws.append([account, summary])
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 100
+    for row in ws.iter_rows(min_row=2):
+        row[1].alignment = Alignment(wrap_text=True)
+    ws.freeze_panes = "A2"
+
+
+def build_excel(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n_advisor: int,
+                notes_by_account: dict[str, str] | None = None) -> str:
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"suspicious_activity_report_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
     wb = Workbook()
@@ -38,11 +53,14 @@ def build_excel(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n
     summ.column_dimensions["A"].width = 28
     _sheet(wb.create_sheet("Discrepancies"), [d for d in discrepancies if not d.kind.startswith("MISSING")])
     _sheet(wb.create_sheet("Unmatched"), [d for d in discrepancies if d.kind.startswith("MISSING")])
+    if notes_by_account:
+        _notes_sheet(wb.create_sheet("Salesforce Notes"), notes_by_account)
     wb.save(path)
     return path
 
 
-def build_pdf(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n_advisor: int) -> str:
+def build_pdf(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n_advisor: int,
+             notes_by_account: dict[str, str] | None = None) -> str:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import landscape, letter
     from reportlab.lib.styles import getSampleStyleSheet
@@ -71,5 +89,10 @@ def build_pdf(discrepancies: list[Discrepancy], out_dir: str, n_client: int, n_a
     rows = [head] + [[Paragraph(str(x), cell) for x in (d.kind, d.account, d.symbol, d.trade_date, d.side, d.client_value,
                                                       d.advisor_value, d.detail)] for d in discrepancies]
     story.append(grid(rows))
+    if notes_by_account:
+        story += [Spacer(1, 16), Paragraph("Salesforce Notes (client ↔ advisor)", styles["Heading2"])]
+        for account, summary_text in notes_by_account.items():
+            story += [Paragraph(f"<b>{account}</b>", styles["Heading4"]),
+                     Paragraph(summary_text or "No notes found.", cell), Spacer(1, 8)]
     SimpleDocTemplate(path, pagesize=landscape(letter), title="Suspicious Activity Report").build(story)
     return path

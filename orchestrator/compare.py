@@ -13,6 +13,25 @@ def _norm_acct(a: str) -> str:
     return "".join(a.split()).upper()
 
 
+def compare_by_account(client: list[Trade], advisor: list[Trade]) -> list[Discrepancy]:
+    """Run the trade comparison separately for every account so trades never cross accounts.
+    Grouping uses excel_io.norm_acct (alphanumeric only), which is looser than the whitespace-only
+    normalisation compare_trades uses for its own ACCOUNT-differs check - deliberately, since here
+    we want "A-1" and "A 1" treated as the same account before the strict per-trade check runs."""
+    from .excel_io import norm_acct  # local import: excel_io does not depend on compare, avoids any cycle risk
+
+    out: list[Discrepancy] = []
+    for acct in sorted({norm_acct(t.account) for t in advisor}):
+        # accounts are already matched, so give each trade the same account text (formatting may differ)
+        c = [t.model_copy(update={"account": acct}) for t in client if norm_acct(t.account) == acct]
+        a = [t.model_copy(update={"account": acct}) for t in advisor if norm_acct(t.account) == acct]
+        label = next(t.account for t in advisor if norm_acct(t.account) == acct)
+        for d in compare_trades(c, a):
+            d.account = label
+            out.append(d)
+    return out
+
+
 def compare_trades(client: list[Trade], advisor: list[Trade]) -> list[Discrepancy]:
     """Match on (symbol, date, side). Price flagged only when the client is disadvantaged:
     BUY with client price > advisor price, SELL with client price < advisor price."""
