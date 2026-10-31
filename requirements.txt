@@ -1,0 +1,17 @@
+claude-agent-sdk
+anthropic
+simple-salesforce
+pymupdf
+openpyxl
+pydantic
+httpx
+msal
+python-dotenv
+pytest
+pytest-asyncio
+reportlab
+requests
+rich
+streamlit
+plotly
+pandas
