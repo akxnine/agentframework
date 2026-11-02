@@ -19,6 +19,7 @@ def setup_logging() -> None:
                           log_time_format="[%H:%M:%S]")
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[handler], force=True)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
 
 
 def step(n: int, title: str) -> None:

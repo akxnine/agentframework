@@ -5,7 +5,7 @@ import os
 import time
 
 import pymupdf
-from openai import AsyncOpenAI
+import anthropic
 
 from .config import Settings
 from .console import ExtractStats
@@ -15,7 +15,7 @@ from .models import Statement, StatementList
 log = logging.getLogger("recon")
 
 PROMPT = """Extract every account statement from the brokerage document below. A document may contain several accounts.
-Return ONLY JSON of this shape:
+Return JSON of this shape:
 {"statements": [{"broker": "brokerage firm name", "account_number": "...", "account_type": "e.g. Individual, IRA, Joint, Trust",
  "account_holder": "primary holder name", "related_persons": ["joint owner, beneficiary, trustee, advisor names"],
  "trades": [{"symbol": "TICKER", "trade_date": "YYYY-MM-DD", "side": "BUY or SELL", "quantity": 0, "price": 0}]}]}
@@ -39,14 +39,6 @@ def read_pdf_text(path: str, stats: ExtractStats | None = None) -> str:
     return text
 
 
-def _json_block(text: str) -> str:
-    """Strip markdown fences / prose around the JSON object the model returns."""
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError(f"model returned no JSON: {text[:200]!r}")
-    return text[start:end + 1]
-
-
 def _normalise(statements: list[Statement], name: str) -> list[Statement]:
     for st in statements:
         st.source_file = name
@@ -68,38 +60,41 @@ async def extract_statements(settings: Settings, path: str, attempts: int = 2,
         stats.total_secs = time.time() - t_start
 
 
-async def _extract(settings: Settings, path: str, attempts: int, stats: ExtractStats) -> list[Statement]:
+async def _extract(settings: Settings, path: str, attempts: int, stats: ExtractStats,
+                   client: anthropic.AsyncAnthropic | None = None) -> list[Statement]:
     t_read = time.time()
     text = read_pdf_text(path, stats)
     stats.read_secs = time.time() - t_read
-    client = AsyncOpenAI(base_url=settings.openai_base_url, api_key="foundry-local")
+    client = client or anthropic.AsyncAnthropic()
     last: Exception | None = None
     name = os.path.basename(path)
     for attempt in range(1, attempts + 1):
         t0 = time.time()
         stats.attempts = attempt
-        resp = await client.chat.completions.create(
-            model=settings.model, temperature=0,
+        # Structured outputs constrain the reply to the StatementList schema, so it is always valid JSON.
+        resp = await client.messages.parse(
+            model=settings.model, max_tokens=settings.max_tokens,
+            output_config={"effort": settings.effort},
+            output_format=StatementList,
             messages=[{"role": "user", "content": f"{PROMPT}\n\nDocument text:\n{text}"}])
         usage = resp.usage
         call = LLMCall(f"{name} (try {attempt}/{attempts})", "Extract accounts & trades from PDF text",
-                       getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0,
-                       time.time() - t0)
+                       usage.input_tokens or 0, usage.output_tokens or 0, time.time() - t0)
         llm_calls.append(call)
         stats.prompt_tokens += call.prompt_tokens
         stats.completion_tokens += call.completion_tokens
         stats.llm_secs += time.time() - t0
-        try:
-            data = StatementList.model_validate_json(_json_block(resp.choices[0].message.content or ""))
-            found = _normalise(data.statements, name)
-            stats.status, stats.statements = "OK", len(found)
-            stats.trades = sum(len(x.trades) for x in found)
-            stats.accounts = [x.account_number for x in found]
-            return found
-        except ValueError as e:  # includes pydantic.ValidationError
+        data = resp.parsed_output
+        if data is None:  # refusal or truncation (max_tokens): no usable output
             call.ok = False
-            last = e
-            log.warning("  attempt %d/%d returned invalid JSON: %s", attempt, attempts, str(e).splitlines()[0])
+            last = ValueError(f"no structured output (stop_reason={resp.stop_reason})")
+            log.warning("  attempt %d/%d returned no structured output: %s", attempt, attempts, resp.stop_reason)
+            continue
+        found = _normalise(data.statements, name)
+        stats.status, stats.statements = "OK", len(found)
+        stats.trades = sum(len(x.trades) for x in found)
+        stats.accounts = [x.account_number for x in found]
+        return found
     raise ValueError(f"could not parse model output: {last}")
 
 

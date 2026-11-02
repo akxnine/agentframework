@@ -1,5 +1,4 @@
-agent-framework
-openai
+anthropic
 pymupdf
 openpyxl
 pydantic
@@ -8,9 +7,7 @@ msal
 python-dotenv
 pytest
 reportlab
-requests
 rich
-psutil
 streamlit
 plotly
 pandas

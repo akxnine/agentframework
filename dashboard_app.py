@@ -9,9 +9,9 @@ import plotly.express as px
 import streamlit as st
 from openpyxl import load_workbook
 
-from recon import server
 from recon.config import Settings
-from recon.costs import LOCAL, PRICING, cost, scan_inputs
+from recon.config import DEFAULT_MODEL
+from recon.costs import PRICING, cost, scan_inputs
 from recon.events import read_events
 from recon.runner import STEPS, RunController
 
@@ -31,11 +31,6 @@ RUNS = os.path.join(OUT, "runs")
 @st.cache_data(ttl=10)
 def cached_scan(folder: str) -> dict:
     return scan_inputs(folder)
-
-
-@st.cache_data(ttl=15)
-def cached_server_status() -> dict:
-    return server.status()
 
 
 def run_files() -> list[str]:
@@ -225,7 +220,7 @@ def metrics_tab(s: dict, pricing: str) -> None:
     df = doc_frame(s, pricing)
     docs = pd.DataFrame(s["docs"])
     pin, pout = int(docs.prompt_tokens.sum()), int(docs.completion_tokens.sum())
-    st.caption(f"Run model: **{s['server'].get('model', 'unknown')}** (local Foundry, no per-token charge). "
+    st.caption(f"Run model: **{s['server'].get('model', 'unknown')}**. "
                f"Cost columns use the pricing selected in the sidebar: **{pricing}**.")
     a, b, c, d, e = st.columns(5)
     a.metric("PDFs OK", f"{(docs.status == 'OK').sum()}/{len(docs)}")
@@ -238,7 +233,7 @@ def metrics_tab(s: dict, pricing: str) -> None:
     st.dataframe(pd.DataFrame([{"Model": n, "$/1M in": pr[0], "$/1M out": pr[1],
                                 "Est. cost for this run ($)": round(cost(pin, pout, n), 4)}
                                for n, pr in PRICING.items()]), hide_index=True, width="stretch")
-    st.caption("Prices are approximate list prices (edit `recon/costs.py`). Local models cost $0 per token.")
+    st.caption("Prices are Anthropic list prices (edit `recon/costs.py`).")
     left, right = st.columns(2)
     left.plotly_chart(px.bar(docs, x="file", y=["read_secs", "llm_secs"], title="Time per PDF (s)"), width="stretch")
     right.plotly_chart(px.bar(docs, x="file", y=["prompt_tokens", "completion_tokens"], title="Tokens per PDF"),
@@ -329,72 +324,23 @@ def history_tab(pricing: str) -> None:
         st.info("No runs yet.")
 
 
-def models_frame(rows: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame([{"Alias": m.get("alias"), "Id": m.get("id"), "Type": m.get("type"),
-                          "Device": m.get("device"), "Size (MB)": m.get("fileSizeMb"),
-                          "Tool calling": m.get("supportsToolCalling"), "License": m.get("license")} for m in rows])
-
-
-def server_tab() -> None:
-    busy = ctl.running
-    c = st.columns([1, 1, 1, 1, 3])
-    action = None
-    if c[0].button("▶ Start", disabled=busy, width="stretch"):
-        action = ("Starting server and loading model (this can take a while)...", server.start)
-    if c[1].button("⏹ Stop", disabled=busy, width="stretch"):
-        action = ("Stopping server...", server.stop)
-    if c[2].button("🔄 Restart", disabled=busy, width="stretch"):
-        action = ("Restarting server...", server.restart)
-    if c[3].button("↻ Refresh", width="stretch"):
-        cached_server_status.clear()
-    if action:
-        with st.spinner(action[0]):
-            ok, msg = action[1]()
-        cached_server_status.clear()
-        st.session_state["server_msg"] = (ok, msg)
-    if busy:
-        st.caption("Server controls are disabled while a run is in progress.")
-    if "server_msg" in st.session_state:
-        ok, msg = st.session_state["server_msg"]
+def api_tab() -> None:
+    cfg = Settings()
+    has_key = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
+    if st.button("↻ Test Claude API connection", disabled=ctl.running):
+        try:
+            st.session_state["api_msg"] = (True, cfg.check_api())
+        except RuntimeError as e:
+            st.session_state["api_msg"] = (False, str(e))
+    if "api_msg" in st.session_state:
+        ok, msg = st.session_state["api_msg"]
         (st.success if ok else st.error)(msg)
-
-    with st.spinner("Reading server status..."):
-        sv = cached_server_status()
-    k = st.columns(4)
-    k[0].metric("State", sv["state"] or "unknown")
-    k[1].metric("API", "reachable" if sv["api_ok"] else "down")
-    k[2].metric("Model served", "yes" if sv["model_served"] else "no")
-    k[3].metric("API latency", f"{sv['latency_ms']:.0f} ms" if sv["latency_ms"] is not None else "-")
-    if not sv["port_match"]:
-        st.warning("FOUNDRY_HOST port differs from the running server. Use Restart to refresh it.")
-
-    st.markdown("##### Server details")
-    endpoint = sv["env_host"] or (sv["urls"][0] if sv["urls"] else "-")
     st.dataframe(pd.DataFrame([
-        ("Foundry CLI", sv["cli_version"]),
-        ("Process running", "yes" if sv["running"] else "no"),
-        ("State", sv["state"] or "unknown"),
-        ("Server URL(s)", ", ".join(sv["urls"]) or "-"),
-        ("FOUNDRY_HOST (env)", sv["env_host"] or "not set"),
-        ("FOUNDRY_MODEL (env)", sv["env_model"] or "not set"),
-        ("Port matches running server", "yes" if sv["port_match"] else "NO"),
-        ("OpenAI-compatible endpoint", f"{endpoint}/v1"),
-        ("Models in API catalog", len(sv["served"])),
-        ("Loaded models", len(sv["loaded"])),
-        ("Cached models", len(sv["cached"])),
-        ("Last checked", time.strftime("%H:%M:%S", time.localtime(sv["checked_at"]))),
+        ("Model (CLAUDE_MODEL)", cfg.model),
+        ("Effort (CLAUDE_EFFORT)", cfg.effort),
+        ("Max output tokens (CLAUDE_MAX_TOKENS)", cfg.max_tokens),
+        ("API key in environment", "yes" if has_key else "no (SDK may still use an `ant auth login` profile)"),
     ], columns=["Property", "Value"]).astype(str), hide_index=True, width="stretch")
-
-    st.markdown("##### Loaded models")
-    if sv["loaded"]:
-        st.dataframe(models_frame(sv["loaded"]), hide_index=True, width="stretch")
-    else:
-        st.caption("None loaded.")
-    st.markdown("##### Cached models")
-    if sv["cached"]:
-        st.dataframe(models_frame(sv["cached"]), hide_index=True, width="stretch")
-    else:
-        st.caption("None cached.")
 
 
 with st.sidebar:
@@ -402,15 +348,17 @@ with st.sidebar:
     folder = st.text_input("Docs folder", Settings().docs_folder)
     dry = st.toggle("Dry run (no email)", True)
     in_place = st.toggle("Update master trackers in place", False)
-    keep = st.toggle("Keep Foundry server running", True)
-    pricing = st.selectbox("Cost model", list(PRICING), index=list(PRICING).index(LOCAL),
-                           help="Token pricing used for cost estimates. The run itself uses the local Foundry model.")
+    default_model = Settings().model
+    pricing = st.selectbox("Cost model", list(PRICING),
+                           index=list(PRICING).index(default_model) if default_model in PRICING
+                           else list(PRICING).index(DEFAULT_MODEL),
+                           help="Token pricing used for cost estimates.")
     scan = cached_scan(folder)
     if not ctl.running:
         if st.button("▶ Run reconciliation", type="primary", width="stretch", disabled=not scan["blocking_ok"]):
             cfg = Settings()
             cfg.docs_folder, cfg.in_place = folder, in_place
-            ctl.start(cfg, dry, keep)
+            ctl.start(cfg, dry)
             st.rerun()
         if not scan["blocking_ok"]:
             st.caption("⚠️ Need statements, client trades and master trackers in the docs folder.")
@@ -424,7 +372,7 @@ with st.sidebar:
     choice = st.selectbox("Run to view", files, format_func=lambda f: os.path.basename(f)[:-6]) if files else None
     selected = live_id or choice
 
-tabs = st.tabs(["🔴 Live", "📈 Metrics", "⚠️ Discrepancies", "📄 Reports", "🕘 History", "🖥 Server"])
+tabs = st.tabs(["🔴 Live", "📈 Metrics", "⚠️ Discrepancies", "📄 Reports", "🕘 History", "🤖 Claude API"])
 state = summarize(read_events(selected)) if selected else summarize([])
 with tabs[0]:
     live_tab(selected, pricing, folder)
@@ -437,4 +385,4 @@ with tabs[3]:
 with tabs[4]:
     history_tab(pricing)
 with tabs[5]:
-    server_tab()
+    api_tab()

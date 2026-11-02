@@ -88,3 +88,37 @@ def test_pdf(tmp_path):
     p = build_pdf(d, str(tmp_path), 1, 1)
     with pymupdf.open(p) as doc:
         assert "PRICE" in doc[0].get_text()
+
+
+def test_extract_statements_with_claude(tmp_path):
+    """Extraction goes through the Anthropic SDK; the client is faked so no network or key is needed."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from recon.config import Settings
+    from recon.console import ExtractStats
+    from recon.extraction import _extract
+    from recon.models import Statement, StatementList
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((50, 50), "Trade AAPL")
+    p = tmp_path / "s.pdf"
+    doc.save(p)
+
+    parsed = StatementList(statements=[Statement(broker="B", account_number=" A-1 ", trades=[T("aapl ", "BUY", 1, 10)])])
+    calls = []
+
+    class FakeMessages:
+        async def parse(self, **kw):
+            calls.append(kw)
+            return SimpleNamespace(parsed_output=parsed, stop_reason="end_turn",
+                                   usage=SimpleNamespace(input_tokens=11, output_tokens=7))
+
+    fake = SimpleNamespace(messages=FakeMessages())
+    stats = ExtractStats("s.pdf")
+    found = asyncio.run(_extract(Settings(), str(p), 2, stats, client=fake))
+    assert calls[0]["model"] == "claude-opus-5-5" and calls[0]["output_format"] is StatementList
+    assert "temperature" not in calls[0]
+    assert found[0].account_number == "A-1"
+    assert (found[0].trades[0].symbol, found[0].trades[0].account) == ("AAPL", "A-1")
+    assert (stats.status, stats.prompt_tokens, stats.completion_tokens) == ("OK", 11, 7)

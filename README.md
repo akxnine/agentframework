@@ -1,30 +1,30 @@
 # Trade Reconciliation
 
-Python CLI that extracts trades from brokerage statement PDFs with a local
-Foundry model, compares them with client trade workbooks, updates master
-trackers, and creates and emails reports when suspicious pricing is found.
-Trade comparison is deterministic; the model is used for statement extraction.
+Python CLI that extracts trades from brokerage statement PDFs with Claude (via the
+[Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python)), compares them with client trade
+workbooks, updates master trackers, and creates and emails reports when suspicious pricing is found.
+Trade comparison is deterministic; the model is used only for statement extraction (structured outputs, so the
+reply always matches the `StatementList` schema).
 
 ## Setup
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+export ANTHROPIC_API_KEY=sk-ant-...      # or run `ant auth login`
 ```
-Install the Foundry Local CLI, then cache `phi-4-mini` (preferred) and/or `gemma-4-e2b-it` with
-`foundry model download <name>`; the preflight uses the first one that is cached. Configure `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`,
-`GRAPH_CLIENT_SECRET`, `GRAPH_SENDER`, and `EMAIL_TO` in the environment or a
-local `.env` file. Graph email requires an Entra app with **Mail.Send**
+Optional environment variables (or a local `.env`): `CLAUDE_MODEL` (default `claude-opus-5-5`), `CLAUDE_EFFORT`
+(`low`..`max`, default `medium`), `CLAUDE_MAX_TOKENS`. For email, configure `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`,
+`GRAPH_CLIENT_SECRET`, `GRAPH_SENDER`, and `EMAIL_TO`; Graph email requires an Entra app with **Mail.Send**
 application permission and admin consent.
 
 ## Run
-Folder layout: `<folder>/statements/*.pdf`, `<folder>/client_trades/*.xlsx`,
-and `<folder>/master/*.xlsx`.
+Folder layout: `<folder>/statements/*.pdf`, `<folder>/client_trades/*.xlsx`, and `<folder>/master/*.xlsx`.
 ```bash
-.venv/bin/python precheck/foundry_preflight.py --run -- --folder ./samples --dry-run
-.venv/bin/python precheck/foundry_preflight.py --run -- --folder ./samples
+.venv/bin/python main.py --folder ./samples --dry-run     # build reports, do not send email
+.venv/bin/python main.py --folder ./samples               # sends email if suspicious pricing is detected
+.venv/bin/python main.py --folder ./samples --model claude-sonnet-5-5
 ```
-The first command verifies the local model and creates reports without sending
-email. The second sends email if suspicious pricing is detected. Updated
-trackers and reports are written under `output/` unless `--in-place` is used.
+Updated trackers and reports are written under `output/` unless `--in-place` is used.
+A dashboard is available with `scripts/run_dashboard.sh` (see [docs/dashboard.md](docs/dashboard.md)).
 
 ## Rules
 Trades match on (symbol, trade date, side). Flagged: quantity or account differences; price when
@@ -33,8 +33,4 @@ Matching and comparison are deterministic code. PDFs must have a text layer;
 scanned PDFs currently fail extraction and are excluded from the comparison.
 
 ## Tests
-`.venv/bin/python -m pytest`
-
-## Microsoft Foundry deployment
-See [FOUNDRY_DEPLOYMENT.md](./FOUNDRY_DEPLOYMENT.md) for deployment prerequisites,
-required application changes, and hosted-agent deployment steps.
+`.venv/bin/python -m pytest` (no API key needed; the Claude client is faked in tests).

@@ -2,22 +2,19 @@
 import glob
 import os
 
-import httpx
+from .config import DEFAULT_MODEL
 
-# USD per 1M tokens (input, output). Approximate public list prices for what-if comparison; edit as needed.
-# The local Foundry model runs on your own hardware, so it is free per token.
+# USD per 1M tokens (input, output): Anthropic list prices. Edit as needed for what-if comparison.
 PRICING: dict[str, tuple[float, float]] = {
-    "Local (Foundry)": (0.0, 0.0),
-    "Claude Sonnet 4.5": (3.0, 15.0),
-    "Claude Haiku 4.5": (1.0, 5.0),
-    "GPT-4o": (2.5, 10.0),
-    "GPT-4o mini": (0.15, 0.60),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-fable-5-1": (10.0, 50.0),
 }
-LOCAL = "Local (Foundry)"
 
 
 def cost(prompt_tokens: float, completion_tokens: float, pricing: str) -> float:
-    pin, pout = PRICING[pricing]
+    pin, pout = PRICING.get(pricing, (0.0, 0.0))
     return prompt_tokens * pin / 1e6 + completion_tokens * pout / 1e6
 
 
@@ -37,23 +34,16 @@ def scan_inputs(docs_folder: str) -> dict:
             pass
         docs.append({"file": os.path.basename(p), "pages": pages, "size_kb": round(os.path.getsize(p) / 1024, 1)})
 
-    host = os.getenv("FOUNDRY_HOST", "").rstrip("/")
-    model = os.getenv("FOUNDRY_MODEL", "")
-    server_ok = False
-    if host:
-        try:
-            r = httpx.get(f"{host}/v1/models", timeout=2)
-            server_ok = model in [m.get("id") for m in r.json().get("data", [])]
-        except (httpx.HTTPError, ValueError):
-            pass
+    model = os.getenv("CLAUDE_MODEL", DEFAULT_MODEL)
+    has_key = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
     email_cfg = all(os.getenv(k) for k in ("GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET",
                                            "GRAPH_SENDER", "EMAIL_TO"))
     checks = [
         ("Statements (PDF)", bool(pdfs), f"{len(pdfs)} found"),
         ("Client trades (xlsx)", bool(client), f"{len(client)} found"),
         ("Master trackers (xlsx)", bool(master), f"{len(master)} found"),
-        ("Foundry model env", bool(host and model), f"{model or 'FOUNDRY_MODEL not set'}"),
-        ("Foundry server serving model", server_ok, "ready" if server_ok else "not ready (pre-check will try to start it)"),
+        ("Claude credentials", has_key, "ANTHROPIC_API_KEY set" if has_key else "ANTHROPIC_API_KEY not set (or use `ant auth login`)"),
+        ("Claude model", True, model),
         ("Email settings", email_cfg, "configured" if email_cfg else "missing (OK for dry run)"),
     ]
     return {"docs": docs, "client_files": [os.path.basename(p) for p in client],

@@ -34,7 +34,7 @@ def compare_by_account(client: list[Trade], advisor: list[Trade]) -> list[Discre
 
 async def run_pipeline(settings: Settings, dry_run: bool = False) -> str:
     step(0, "Pre-check")
-    log.info("[green]✔[/] Foundry server ready: [bold]%s[/]", settings.check_server())
+    log.info("[green]✔[/] [bold]%s[/]", settings.check_api())
     out_dir = settings.output_folder
     llm_calls.clear()
     summary = Summary()

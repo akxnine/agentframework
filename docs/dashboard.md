@@ -6,8 +6,7 @@ The CLI (`main.py`) is unchanged and keeps working.
 ## Prerequisites
 
 - Python 3.10+
-- Microsoft Foundry Local installed (`foundry` on PATH) with a model downloaded (`foundry model download <name>`).
-  See [FOUNDRY_DEPLOYMENT.md](../FOUNDRY_DEPLOYMENT.md).
+- `ANTHROPIC_API_KEY` set (or an `ant auth login` profile). Model is `CLAUDE_MODEL` (default `claude-opus-5-5`).
 - Optional `.env` for email (`GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`, `GRAPH_CLIENT_SECRET`, `GRAPH_SENDER`, `EMAIL_TO`).
   Not needed for dry runs.
 
@@ -40,9 +39,7 @@ The script uses `.venv` when present (otherwise `python3`) and installs missing 
 3. Choose options:
    - **Dry run**: build reports but do not send email (default on).
    - **Update master trackers in place**: otherwise copies go to `output/master`.
-   - **Keep Foundry server running**: leave the server up after the run.
-4. Click **▶ Run reconciliation**. If the Foundry server is not ready, the pre-check runs
-   `precheck/foundry_preflight.py` to start it and load a model. **⏹ Cancel** stops the run at the next await point
+4. Click **▶ Run reconciliation**. The pre-check verifies the Claude credentials and model first. **⏹ Cancel** stops the run at the next await point
    (a PDF already inside an LLM call finishes first).
 
 ### Tabs
@@ -54,6 +51,7 @@ The script uses `.venv` when present (otherwise `python3`) and installs missing 
 | ⚠️ Discrepancies | Filter by kind/account, PRICE rows highlighted, CSV export |
 | 📄 Reports | Download generated suspicious-activity Excel/PDF |
 | 🕘 History | All past runs and their totals |
+| 🤖 Claude API | Model settings and a connection test |
 
 Use **Run to view** in the sidebar to open a past run in every tab.
 
@@ -72,7 +70,7 @@ Open the repo and pick a configuration from **Run and Debug** (defined in [.vsco
 
 - **Debug: Dashboard (Streamlit)**: launches the dashboard under the debugger; set breakpoints in
   `dashboard_app.py`, `recon/runner.py` or `recon/pipeline.py`.
-- **Debug: CLI pipeline (dry run)**: runs `main.py --folder ./samples --dry-run --keep-server`.
+- **Debug: CLI pipeline (dry run)**: runs `main.py --folder ./samples --dry-run`.
 
 ### Attach from a terminal
 
@@ -91,7 +89,7 @@ Note: the pipeline runs in a worker thread, so breakpoints in `recon/` code hit 
 
 | Symptom | Fix |
 |---------|-----|
-| Run fails immediately with "Pre-check failed" | Run `python precheck/foundry_preflight.py` for details; check `foundry` is installed and a model is cached |
+| Run fails immediately with "authentication failed" | Set `ANTHROPIC_API_KEY`; use the **🤖 Claude API** tab to test the connection |
 | "A run is already in progress" | Wait or press Cancel; only one run at a time per dashboard process |
 | Port in use | `scripts/run_dashboard.sh 8502` |
 | No data in Metrics/Discrepancies | Select a finished run in **Run to view** |
